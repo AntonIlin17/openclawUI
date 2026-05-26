@@ -494,6 +494,7 @@ async function ensureServicesReady(reason: string): Promise<void> {
     try {
       await ensureWslSubsystemReady();
       await ensureWslDistroReady();
+      await probeOpenClawPath();
       await startModelProcess();
       if (await probeGateway(settings.gatewayUrl)) {
         logger.info("warmup", "gateway already healthy on entry");
@@ -526,6 +527,24 @@ async function ensureWslSubsystemReady(): Promise<void> {
   }
 }
 
+async function probeOpenClawPath(): Promise<void> {
+  try {
+    const output = await runWsl(
+      ["-d", settings.wslDistro, "--", "bash", "-ilc", "command -v openclaw || which openclaw || true; echo '---'; echo \"PATH=$PATH\""],
+      { timeoutMs: 10_000, logScope: "openclaw-probe" },
+    );
+    const [pathLine, ...rest] = output.split("---");
+    const resolved = pathLine.trim();
+    if (!resolved) {
+      logger.warn("openclaw-probe", "openclaw NOT found on PATH inside WSL", { wslPath: rest.join("---").trim() });
+    } else {
+      logger.info("openclaw-probe", "openclaw resolved", { binary: resolved, wslPath: rest.join("---").trim() });
+    }
+  } catch (error) {
+    logger.warn("openclaw-probe", "probe failed", { message: errorMessage(error) });
+  }
+}
+
 async function ensureWslDistroReady(timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
@@ -554,7 +573,7 @@ async function startModelProcess(): Promise<void> {
     return;
   }
   logger.info("model", `starting model: ${command}`);
-  modelProcess = spawn("wsl.exe", ["-d", settings.wslDistro, "--", "sh", "-lc", command], {
+  modelProcess = spawn("wsl.exe", ["-d", settings.wslDistro, "--", "bash", "-ilc", command], {
     windowsHide: true,
   });
   logger.attachChild("model", modelProcess);
@@ -576,7 +595,7 @@ async function startGatewayProcess(): Promise<void> {
   }
   const command = settings.gatewayCommand || "openclaw gateway start";
   logger.info("gateway-proc", `spawning gateway`, { command, distro: settings.wslDistro });
-  gatewayProcess = spawn("wsl.exe", ["-d", settings.wslDistro, "--", "sh", "-lc", command], {
+  gatewayProcess = spawn("wsl.exe", ["-d", settings.wslDistro, "--", "bash", "-ilc", command], {
     windowsHide: true,
   });
   logger.attachChild("gateway-proc", gatewayProcess);
@@ -595,7 +614,7 @@ async function runGatewayDiagnostics(): Promise<void> {
   ];
   for (const item of commands) {
     try {
-      const output = await runWsl(["-d", settings.wslDistro, "--", "sh", "-lc", item.cmd], { timeoutMs: item.timeoutMs, logScope: "diag" });
+      const output = await runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", item.cmd], { timeoutMs: item.timeoutMs, logScope: "diag" });
       logger.info("diag", item.label, { output: output.slice(0, 4000) });
     } catch (error) {
       logger.warn("diag", `${item.label} failed`, { message: errorMessage(error) });
@@ -623,7 +642,7 @@ function sleep(ms: number): Promise<void> {
 async function stopGatewayProcess(): Promise<void> {
   gateway.stop();
   try {
-    await runWsl(["-d", settings.wslDistro, "--", "sh", "-lc", "openclaw gateway stop"], { timeoutMs: 15000 });
+    await runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", "openclaw gateway stop"], { timeoutMs: 15000, logScope: "gateway-proc" });
   } catch {}
   gatewayProcess?.kill();
   gatewayProcess = null;
@@ -632,7 +651,7 @@ async function stopGatewayProcess(): Promise<void> {
 async function restartGateway(): Promise<GatewayStatus> {
   gateway.stop();
   try {
-    await runWsl(["-d", settings.wslDistro, "--", "sh", "-lc", "openclaw gateway restart"], { timeoutMs: 30000 });
+    await runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", "openclaw gateway restart"], { timeoutMs: 30000, logScope: "gateway-proc" });
   } catch {
     await startGatewayProcess();
   }
