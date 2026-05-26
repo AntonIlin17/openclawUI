@@ -13,10 +13,12 @@
     "build:renderer": "vite build",
     "generate:icons": "tsx scripts/generate-icons.ts",
     "dist": "npm run build && electron-builder --win nsis",
+    "release": "npm run build && electron-builder --win nsis --publish always",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
+    "electron-updater": "^6.8.3",
     "highlight.js": "^11.11.1",
     "html2pdf.js": "^0.12.0",
     "katex": "^0.16.22",
@@ -78,6 +80,14 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "OpenClaw Desktop"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "AntonIlin17",
+        "repo": "openclawUI",
+        "releaseType": "release"
+      }
+    ]
   }
 }

@@ -37,6 +37,9 @@ export async function exportConversation(input: ExportInput): Promise<string | n
 function toMarkdown(title: string, messages: ChatMessage[]): string {
   const parts = [`# ${title}`, ""];
   for (const message of messages) {
+    if (message.role === "thinking") {
+      continue;
+    }
     parts.push(`## ${label(message.role)}`, "");
     if (message.toolName) {
       parts.push(`**Tool:** ${message.toolName}`, "");
@@ -50,7 +53,15 @@ function toMarkdown(title: string, messages: ChatMessage[]): string {
 }
 
 function label(role: ChatMessage["role"]): string {
-  return role === "assistant" ? "Assistant" : role === "user" ? "User" : role === "tool" ? "Tool" : "System";
+  return role === "assistant"
+    ? "Assistant"
+    : role === "user"
+      ? "User"
+      : role === "tool"
+        ? "Tool"
+        : role === "thinking"
+          ? "Thinking"
+          : "System";
 }
 
 function formatUnknown(value: unknown): string {

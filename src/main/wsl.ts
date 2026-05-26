@@ -1,17 +1,24 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { logger } from "./logger.js";
 import type { AppSettings } from "../shared/types.js";
 
-export function runWsl(args: string[], opts?: { timeoutMs?: number }): Promise<string> {
+export function runWsl(args: string[], opts?: { timeoutMs?: number; logScope?: string }): Promise<string> {
+  const scope = opts?.logScope ?? "wsl";
+  const summary = summarizeArgs(args);
+  const startedAt = Date.now();
+  logger.debug(scope, `wsl exec: ${summary}`);
   return new Promise((resolve, reject) => {
     const child = spawn("wsl.exe", args, { windowsHide: true });
     let stdout = "";
     let stderr = "";
+    const timeoutMs = opts?.timeoutMs ?? 15000;
     const timeout = setTimeout(() => {
       child.kill();
-      reject(new Error(`wsl timed out: ${args.join(" ")}`));
-    }, opts?.timeoutMs ?? 15000);
+      logger.warn(scope, `wsl timed out after ${timeoutMs}ms: ${summary}`);
+      reject(new Error(`wsl timed out: ${summary}`));
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
     });
@@ -20,17 +27,27 @@ export function runWsl(args: string[], opts?: { timeoutMs?: number }): Promise<s
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
+      logger.error(scope, `wsl spawn error: ${error.message}`, { summary });
       reject(error);
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      const elapsed = Date.now() - startedAt;
       if (code === 0) {
+        logger.debug(scope, `wsl ok in ${elapsed}ms: ${summary}`, { stdoutBytes: stdout.length });
         resolve(stdout.trim());
       } else {
-        reject(new Error(stderr.trim() || `wsl exited with code ${code}`));
+        const err = stderr.trim() || `wsl exited with code ${code}`;
+        logger.warn(scope, `wsl failed (code=${code}) in ${elapsed}ms: ${summary}`, { stderr: err.slice(0, 1000) });
+        reject(new Error(err));
       }
     });
   });
+}
+
+function summarizeArgs(args: string[]): string {
+  const joined = args.join(" ");
+  return joined.length > 200 ? `${joined.slice(0, 200)}…` : joined;
 }
 
 export async function listDistros(): Promise<string[]> {
@@ -103,7 +120,9 @@ export async function orientOpenClaw(settings: AppSettings, windowsPaths: string
     startMarker,
     "## OpenClaw Desktop Windows File Access",
     "When the user asks for Windows files, use WSL mount paths. Windows drives are mounted as `/mnt/c`, `/mnt/d`, etc.",
-    "If a user mentions a file, folder, or partial path that appears under one of these locations, use filesystem tools directly instead of asking them to attach it.",
+    "If a user mentions a file, folder, or partial path that appears under one of these locations, read it directly instead of asking them to attach it.",
+    "Tool usage: do NOT call a tool literally named `read_file` or `read-file` — that name is from other agents and is not exposed here. Use the filesystem/shell tools that OpenClaw actually advertises in your tool list. If you are unsure which file tool to use, fall back to the shell tool (e.g. `shell`, `bash`, `exec`, `run_shell`, or whichever shell-execution tool is listed) and run `cat <path>`, `head -n 200 <path>`, or `ls -la <path>` against the absolute `/mnt/<drive>/...` path. Pass the path verbatim with no scheme prefix such as `open:` or `file:`.",
+    "For local file, repository, or UI-flow questions, stay within local filesystem/project context. Do not call external search or web tools such as google:search unless the user explicitly asks for external or current web information.",
     "Allowed Windows locations:",
     ...windowsPaths.map((item) => `- ${item} -> ${windowsPathToWsl(item)}`),
     endMarker,
@@ -117,6 +136,70 @@ export async function orientOpenClaw(settings: AppSettings, windowsPaths: string
     "-lc",
     `mkdir -p ~/.openclaw && touch ~/.openclaw/AGENTS.md && awk 'BEGIN{skip=0} /${startMarker}/{skip=1; next} /${endMarker}/{skip=0; next} skip==0{print}' ~/.openclaw/AGENTS.md > ~/.openclaw/AGENTS.md.tmp && printf '\\n%s\\n' '${escaped}' >> ~/.openclaw/AGENTS.md.tmp && mv ~/.openclaw/AGENTS.md.tmp ~/.openclaw/AGENTS.md`,
   ]);
+}
+
+export function detectToolsEnabled(config: Record<string, unknown> | null): boolean | null {
+  if (!config) {
+    return null;
+  }
+  const tools = asRecord(config.tools);
+  if (typeof tools.enabled === "boolean") {
+    return tools.enabled;
+  }
+  if (Array.isArray(tools.allow) && tools.allow.length > 0) {
+    return true;
+  }
+  const agent = asRecord(config.agent);
+  const agentTools = asRecord(agent.tools);
+  if (typeof agentTools.enabled === "boolean") {
+    return agentTools.enabled;
+  }
+  const capabilities = config.capabilities;
+  if (Array.isArray(capabilities)) {
+    const names = capabilities.map((item) => String(item).toLowerCase());
+    if (names.some((item) => item.includes("file") || item.includes("shell") || item.includes("read"))) {
+      return true;
+    }
+  }
+  return null;
+}
+
+export async function prefetchDirectoryListing(
+  settings: AppSettings,
+  wslPath: string,
+  opts?: { maxDepth?: number; maxEntries?: number },
+): Promise<string> {
+  const maxDepth = opts?.maxDepth ?? 2;
+  const maxEntries = opts?.maxEntries ?? 80;
+  const escaped = wslPath.replaceAll("'", "'\"'\"'");
+  const script = `find '${escaped}' -maxdepth ${maxDepth} \\( -type f -o -type d \\) 2>/dev/null | head -n ${maxEntries}`;
+  try {
+    const output = await runWsl(["-d", settings.wslDistro, "--", "sh", "-lc", script], { timeoutMs: 20000 });
+    if (!output.trim()) {
+      return `Directory listing for ${wslPath}: (empty or not accessible)`;
+    }
+    return `Directory listing for ${wslPath}:\n${output}`;
+  } catch (error) {
+    return `Directory listing for ${wslPath} failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+export function resolveReferencedWslPaths(message: string, windowsRoots: string[]): string[] {
+  const lower = message.toLowerCase();
+  const hits = new Set<string>();
+  for (const root of windowsRoots) {
+    const wsl = windowsPathToWsl(root);
+    const segments = [
+      ...root.split(/[/\\]/).filter(Boolean),
+      ...wsl.split("/").filter(Boolean),
+    ]
+      .map((item) => item.toLowerCase())
+      .filter((item) => item.length >= 3 && item !== "mnt" && !/^[a-z]$/.test(item));
+    if (segments.some((segment) => lower.includes(segment))) {
+      hits.add(wsl);
+    }
+  }
+  return [...hits];
 }
 
 export async function fileInfoFromPaths(paths: string[]) {

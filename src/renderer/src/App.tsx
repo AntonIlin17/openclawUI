@@ -29,6 +29,7 @@ import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import "./styles.css";
 import type {
+  ActiveRunStatus,
   AgentSummary,
   AppSettings,
   Attachment,
@@ -38,6 +39,7 @@ import type {
   ModelChoice,
   ThinkingLevel,
 } from "../../shared/types";
+import type { LogEntry } from "../../shared/ipc";
 
 const blankStatus: GatewayStatus = { state: "connecting", detail: "Starting" };
 
@@ -134,6 +136,14 @@ function App() {
   }, [conversations, search]);
 
   const activeConversation = conversations.find((item) => item.key === activeKey);
+  const activeRun = status.activeRun?.sessionKey === activeKey ? status.activeRun : undefined;
+
+  async function cancelActiveRun() {
+    if (!activeRun) {
+      return;
+    }
+    await window.openclaw.cancelRun({ sessionKey: activeRun.sessionKey, runId: activeRun.runId }).catch(() => undefined);
+  }
 
   return (
     <div className="app-shell">
@@ -199,6 +209,7 @@ function App() {
           models={models}
           conversation={activeConversation}
           onSettings={() => setSettingsOpen(true)}
+          onCancelRun={() => void cancelActiveRun()}
           onExport={(format) => {
             if (activeConversation) {
               void window.openclaw.exportConversation({ sessionTitle: activeConversation.title, messages, format });
@@ -210,6 +221,8 @@ function App() {
             messages={messages}
             sessionKey={activeKey}
             settings={settings}
+            activeRun={activeRun}
+            onCancelRun={() => void cancelActiveRun()}
             onSent={(input) => {
               void window.openclaw.sendMessage(input);
             }}
@@ -222,11 +235,11 @@ function App() {
         <SettingsModal
           settings={settings}
           onClose={() => setSettingsOpen(false)}
-          onSave={(next) => {
-            void window.openclaw.saveSettings(next).then((saved) => {
-              setSettings(saved);
+          onSaved={(next, close = true) => {
+            setSettings(next);
+            if (close) {
               setSettingsOpen(false);
-            });
+            }
           }}
         />
       ) : null}
@@ -282,15 +295,18 @@ function Header(props: {
   models: ModelChoice[];
   conversation?: ConversationSummary;
   onSettings: () => void;
+  onCancelRun: () => void;
   onExport: (format: "markdown" | "pdf") => void;
 }) {
+  const isRunActive = Boolean(props.status.activeRun && (props.status.state === "running" || props.status.state === "streaming"));
+  const elapsedMs = useElapsedMs(props.status.activeRun?.startedAt, isRunActive);
   return (
     <header className="header">
       <div className="header-title">
         <PanelLeft size={17} />
         <div>
           <strong>{props.conversation?.title ?? "OpenClaw Desktop"}</strong>
-          <span>{props.status.detail ?? props.status.state}</span>
+          <span>{formatStatusLine(props.status, elapsedMs)}</span>
         </div>
       </div>
       <div className="power-controls">
@@ -300,8 +316,13 @@ function Header(props: {
             <option key={model.id} value={model.id}>{model.provider}/{model.name}</option>
           ))}
         </select>
-        <span className={`status-pill ${props.status.state}`}>{props.status.state}</span>
+        <span className={`status-pill ${props.status.state}`}>{isRunActive ? `running ${formatElapsed(elapsedMs)}` : props.status.state}</span>
         <span className="tokens">{props.conversation?.totalTokens ?? props.status.totalTokens ?? 0} tokens</span>
+        {isRunActive ? (
+          <button className="run-cancel" title="Stop current run" disabled={props.status.activeRun?.cancelRequested} onClick={props.onCancelRun}>
+            <Square size={16} />
+          </button>
+        ) : null}
         <button title="Export Markdown" onClick={() => props.onExport("markdown")}><FilePlus size={16} /></button>
         <button title="Export PDF" onClick={() => props.onExport("pdf")}><MoreHorizontal size={16} /></button>
         <button title="Settings" onClick={props.onSettings}><Settings size={16} /></button>
@@ -314,6 +335,8 @@ function ChatView(props: {
   messages: ChatMessage[];
   sessionKey: string;
   settings: AppSettings | null;
+  activeRun?: ActiveRunStatus;
+  onCancelRun: () => void;
   onSent: (input: { sessionKey: string; message: string; thinking: ThinkingLevel; attachments: Attachment[] }) => void;
 }) {
   const [text, setText] = useState("");
@@ -333,7 +356,7 @@ function ChatView(props: {
   }, [props.messages]);
 
   function send() {
-    if (!text.trim() && attachments.length === 0) {
+    if (props.activeRun || (!text.trim() && attachments.length === 0)) {
       return;
     }
     props.onSent({ sessionKey: props.sessionKey, message: text.trim(), thinking: props.settings?.thinking ?? "brief", attachments });
@@ -349,6 +372,8 @@ function ChatView(props: {
     setAttachments((items) => [...items, ...resolved]);
   }
 
+  const canSend = !props.activeRun && (Boolean(text.trim()) || attachments.length > 0);
+
   return (
     <>
       <div
@@ -362,7 +387,7 @@ function ChatView(props: {
         }}
       >
         {props.messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+          <MessageRow key={message.id} message={message} />
         ))}
       </div>
       <div className="composer-wrap">
@@ -395,17 +420,47 @@ function ChatView(props: {
             placeholder="Message OpenClaw..."
           />
           <button className={recording ? "recording" : ""} title="Voice input" onClick={() => startVoice(setText, setRecording)}><Mic size={18} /></button>
-          <button className="send" title="Send" onClick={send}><Play size={18} /></button>
+          {props.activeRun ? (
+            <button className="send cancel-run" title="Stop current run" disabled={props.activeRun.cancelRequested} onClick={props.onCancelRun}><Square size={18} /></button>
+          ) : (
+            <button className="send" title="Send" disabled={!canSend} onClick={send}><Play size={18} /></button>
+          )}
         </div>
       </div>
     </>
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageRow({ message }: { message: ChatMessage }) {
+  if (message.role === "thinking") {
+    return <ThinkingCard message={message} />;
+  }
   if (message.role === "tool") {
     return <ToolCard message={message} />;
   }
+  return <MessageBubble message={message} />;
+}
+
+function ThinkingCard({ message }: { message: ChatMessage }) {
+  const [open, setOpen] = useState(false);
+  const label = message.thinkingLabel ?? "Thinking";
+  return (
+    <div className="thinking-card">
+      <button className="thinking-summary" onClick={() => setOpen(!open)}>
+        <ChevronDown size={13} className={open ? "thinking-chevron open" : "thinking-chevron"} />
+        <strong>{label}</strong>
+        <span>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open ? (
+        <div className="thinking-detail">
+          <pre>{message.content}</pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MessageBubble({ message }: { message: ChatMessage }) {
   return (
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : "OC"}</div>
@@ -422,13 +477,15 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 
 function ToolCard({ message }: { message: ChatMessage }) {
   const [open, setOpen] = useState(false);
+  const errorHint = message.toolError ? toolErrorHint(message) : "";
   return (
     <div className="tool-card">
       <button className="tool-summary" onClick={() => setOpen(!open)}>
         <span>{message.toolPartial ? <Square size={13} /> : <Check size={13} />}</span>
         <strong>{message.toolName ?? "tool"}</strong>
-        <span>{message.toolPartial ? "running" : message.toolError ? "error" : "complete"}</span>
+        <span className={message.toolError ? "tool-state-error" : undefined}>{message.toolPartial ? "running" : message.toolError ? "error" : "complete"}</span>
       </button>
+      {message.toolError ? <p className="tool-error-text">{errorHint}</p> : null}
       {open ? (
         <div className="tool-detail">
           <pre>{JSON.stringify({ args: message.toolArgs, result: message.toolResult }, null, 2)}</pre>
@@ -497,8 +554,30 @@ function EmptyState({ onStart }: { onStart: () => void }) {
   );
 }
 
-function SettingsModal(props: { settings: AppSettings; onClose: () => void; onSave: (settings: AppSettings) => void }) {
+function SettingsModal(props: {
+  settings: AppSettings;
+  onClose: () => void;
+  onSaved: (settings: AppSettings, close?: boolean) => void;
+}) {
   const [draft, setDraft] = useState(props.settings);
+  const [toolsStatus, setToolsStatus] = useState<boolean | null>(null);
+  const [orientMessage, setOrientMessage] = useState<string | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    void window.openclaw.getToolsStatus().then((status) => setToolsStatus(status.toolsEnabled));
+  }, []);
+
+  async function handleOrient() {
+    setOrientMessage(null);
+    try {
+      await window.openclaw.orientOpenClaw(draft.fileAccessPaths);
+      setOrientMessage("Wrote folder guidance to ~/.openclaw/AGENTS.md in WSL.");
+    } catch (error) {
+      setOrientMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   return (
     <div className="modal-backdrop">
       <div className="modal">
@@ -507,6 +586,9 @@ function SettingsModal(props: { settings: AppSettings; onClose: () => void; onSa
           <label>Gateway URL<input value={draft.gatewayUrl} onChange={(e) => setDraft({ ...draft, gatewayUrl: e.target.value })} /></label>
           <label>WSL distro<input value={draft.wslDistro} onChange={(e) => setDraft({ ...draft, wslDistro: e.target.value })} /></label>
           <label>Gateway command<input value={draft.gatewayCommand} onChange={(e) => setDraft({ ...draft, gatewayCommand: e.target.value })} /></label>
+          <label>Local model command (optional)<input value={draft.modelStartCommand ?? ""} placeholder="e.g. ollama serve" onChange={(e) => setDraft({ ...draft, modelStartCommand: e.target.value })} /></label>
+          <p className="settings-hint">Runs in WSL before the gateway when the app opens. Leave empty if your gateway command already starts the model.</p>
+          <label className="toggle"><input type="checkbox" checked={draft.autoStartGateway} onChange={(e) => setDraft({ ...draft, autoStartGateway: e.target.checked })} /> Start gateway when app opens</label>
           <label>Auth<select value={draft.authMode} onChange={(e) => setDraft({ ...draft, authMode: e.target.value as AppSettings["authMode"] })}><option value="auto">Auto</option><option value="none">None</option><option value="token">Token</option><option value="password">Password</option></select></label>
           <label>Token<input type="password" value={draft.token ?? ""} onChange={(e) => setDraft({ ...draft, token: e.target.value })} /></label>
           <label>Password<input type="password" value={draft.password ?? ""} onChange={(e) => setDraft({ ...draft, password: e.target.value })} /></label>
@@ -515,6 +597,14 @@ function SettingsModal(props: { settings: AppSettings; onClose: () => void; onSa
         </div>
         <div className="file-access">
           <strong>Windows file access</strong>
+          <p className="settings-hint">
+            Folders you add here are reachable from Ubuntu via WSL mounts (<code>C:\...</code> becomes <code>/mnt/c/...</code>).
+            Save updates <code>~/.openclaw/AGENTS.md</code> so the agent knows which roots to use. Attach files in chat only for paths outside these folders.
+          </p>
+          {toolsStatus === false ? (
+            <p className="settings-warning">OpenClaw file tools do not appear enabled in ~/.openclaw/openclaw.json. Run <code>openclaw doctor</code> in WSL, then restart the gateway.</p>
+          ) : null}
+          {toolsStatus === true ? <p className="settings-ok">OpenClaw tools appear enabled in config.</p> : null}
           {draft.fileAccessPaths.map((item) => (
             <span className="chip" key={item}>
               {item}
@@ -543,15 +633,216 @@ function SettingsModal(props: { settings: AppSettings; onClose: () => void; onSa
           >
             Add folders
           </button>
-          <button onClick={() => void window.openclaw.orientOpenClaw(draft.fileAccessPaths)}>Write OpenClaw guidance</button>
+          <button onClick={() => void handleOrient()}>Write OpenClaw guidance</button>
+          <label className="toggle prefetch-toggle">
+            <input
+              type="checkbox"
+              checked={draft.prefetchFileListings !== false}
+              onChange={(e) => setDraft({ ...draft, prefetchFileListings: e.target.checked })}
+            />
+            Prefetch folder listings into Thinking when your message mentions an allowed folder
+          </label>
+          {orientMessage ? <p className="settings-hint">{orientMessage}</p> : null}
+          {saveMessage ? <p className="settings-hint">{saveMessage}</p> : null}
+        </div>
+        <DiagnosticsPanel />
+        <div className="setup-checklist">
+          <strong>WSL setup checklist</strong>
+          <ol>
+            <li><code>ls /mnt/c/Users/&lt;you&gt;/...</code> — confirm the folder is visible in WSL</li>
+            <li><code>cat ~/.openclaw/openclaw.json</code> — inspect agent tool settings</li>
+            <li><code>openclaw doctor</code> — run diagnostics</li>
+            <li>Restart gateway from the header after config changes</li>
+          </ol>
         </div>
         <div className="modal-actions">
           <button onClick={props.onClose}>Cancel</button>
-          <button className="send" onClick={() => props.onSave(draft)}>Save</button>
+          <button
+            className="send"
+            onClick={() => {
+              setSaveMessage(null);
+              void window.openclaw.saveSettings(draft).then((result) => {
+                setDraft(result.settings);
+                if (result.orientError) {
+                  setSaveMessage(`Saved, but AGENTS.md update failed: ${result.orientError}`);
+                  props.onSaved(result.settings, false);
+                  return;
+                }
+                props.onSaved(result.settings, true);
+              });
+            }}
+          >
+            Save
+          </button>
         </div>
       </div>
     </div>
   );
+}
+
+function DiagnosticsPanel() {
+  const [entries, setEntries] = useState<LogEntry[]>([]);
+  const [filter, setFilter] = useState("");
+  const [follow, setFollow] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [logPath, setLogPath] = useState<{ file: string; folder: string } | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    void window.openclaw.tailLogs(400).then(setEntries);
+    void window.openclaw.getLogsPath().then(setLogPath);
+    const off = window.openclaw.on<LogEntry>("logs:entry", (entry) => {
+      setEntries((prev) => {
+        const next = [...prev, entry];
+        return next.length > 800 ? next.slice(next.length - 800) : next;
+      });
+    });
+    return off;
+  }, []);
+
+  useEffect(() => {
+    if (!follow) {
+      return;
+    }
+    const node = containerRef.current;
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [entries, follow]);
+
+  const filtered = useMemo(() => {
+    const term = filter.trim().toLowerCase();
+    if (!term) {
+      return entries;
+    }
+    return entries.filter((entry) =>
+      `${entry.level} ${entry.scope} ${entry.message} ${entry.data ? JSON.stringify(entry.data) : ""}`.toLowerCase().includes(term),
+    );
+  }, [entries, filter]);
+
+  async function runDiagnostics() {
+    setRunning(true);
+    try {
+      const result = await window.openclaw.runDiagnostics();
+      setEntries(result);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function checkUpdates() {
+    setUpdateInfo("Checking…");
+    try {
+      const result = await window.openclaw.checkForUpdates();
+      if (!result.ok) {
+        setUpdateInfo(`Cannot check: ${result.reason ?? "unknown"} (current ${result.current ?? "?"})`);
+        return;
+      }
+      if (result.version && result.version !== result.current) {
+        setUpdateInfo(`Update ${result.version} available — downloading. You'll be prompted to restart.`);
+      } else {
+        setUpdateInfo(`Up to date (${result.current}).`);
+      }
+    } catch (error) {
+      setUpdateInfo(`Check failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  return (
+    <div className="diagnostics-panel">
+      <div className="diagnostics-header">
+        <strong>Diagnostics &amp; logs</strong>
+        <div className="diagnostics-actions">
+          <button onClick={() => void runDiagnostics()} disabled={running}>
+            {running ? "Running…" : "Run gateway diagnostics"}
+          </button>
+          <button onClick={() => void window.openclaw.openLogFile()}>Open log file</button>
+          <button onClick={() => void window.openclaw.openLogsFolder()}>Open folder</button>
+          <button onClick={() => void checkUpdates()}>Check for updates</button>
+        </div>
+      </div>
+      {logPath ? <p className="settings-hint">Log file: <code>{logPath.file}</code></p> : null}
+      {updateInfo ? <p className="settings-hint">{updateInfo}</p> : null}
+      <div className="diagnostics-toolbar">
+        <input
+          className="diagnostics-filter"
+          placeholder="Filter (scope, message…)"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+        />
+        <label className="toggle">
+          <input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} />
+          Follow new entries
+        </label>
+      </div>
+      <div className="diagnostics-log" ref={containerRef}>
+        {filtered.length === 0 ? (
+          <p className="settings-hint">No log entries yet.</p>
+        ) : (
+          filtered.map((entry, index) => (
+            <div className={`log-row level-${entry.level}`} key={`${entry.ts}-${index}`}>
+              <span className="log-ts">{entry.ts.slice(11, 19)}</span>
+              <span className={`log-level lvl-${entry.level}`}>{entry.level}</span>
+              <span className="log-scope">{entry.scope}</span>
+              <span className="log-message">{entry.message}</span>
+              {entry.data ? <pre className="log-data">{JSON.stringify(entry.data, null, 0)}</pre> : null}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function useElapsedMs(startedAt?: number, active = false): number {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active || !startedAt) {
+      return;
+    }
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active, startedAt]);
+  return active && startedAt ? Math.max(0, now - startedAt) : 0;
+}
+
+function formatStatusLine(status: GatewayStatus, elapsedMs: number): string {
+  const activeRun = status.activeRun;
+  if (activeRun && (status.state === "running" || status.state === "streaming")) {
+    const label = activeRun.cancelRequested ? "OpenClaw cancelling" : "OpenClaw running";
+    const activity = activeRun.activity ?? status.detail ?? "Working";
+    return `${label} · ${formatElapsed(elapsedMs)} · ${activity}`;
+  }
+  return status.detail ?? status.state;
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function toolErrorHint(message: ChatMessage): string {
+  const name = message.toolName ?? "tool";
+  const detail = stringifyToolValue(message.toolResult || message.content);
+  if (/tool.*not found|not found.*tool|unknown tool|missing tool/i.test(`${name} ${detail}`)) {
+    return `OpenClaw Gateway reported that ${name} is not available. Check ~/.openclaw/openclaw.json or run openclaw doctor in WSL, then restart the gateway.`;
+  }
+  return `OpenClaw Gateway reported an error while running ${name}. Expand for the raw result.`;
+}
+
+function stringifyToolValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function startVoice(setText: React.Dispatch<React.SetStateAction<string>>, setRecording: React.Dispatch<React.SetStateAction<boolean>>) {

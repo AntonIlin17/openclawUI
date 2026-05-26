@@ -9,9 +9,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   port: 18789,
   wslDistro: "Ubuntu",
   gatewayCommand: "openclaw gateway start",
+  modelStartCommand: "",
+  autoStartGateway: true,
   authMode: "auto",
   autostart: false,
-  fileAccessPaths: ["C:\\"],
+  fileAccessPaths: [],
+  prefetchFileListings: true,
   thinking: "brief",
 };
 

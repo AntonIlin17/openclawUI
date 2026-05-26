@@ -3,7 +3,8 @@ import { randomUUID, createHash, createPublicKey, generateKeyPairSync, sign } fr
 import fs from "node:fs";
 import path from "node:path";
 import { WebSocket } from "ws";
-import type { AppSettings, GatewayEventFrame, GatewayStatus, ThinkingLevel } from "../shared/types.js";
+import { buildFileAccessContext, buildWireMessage } from "../shared/message-context.js";
+import type { ActiveRunStatus, AppSettings, CancelRunInput, CancelRunResult, GatewayEventFrame, GatewayStatus, ThinkingLevel } from "../shared/types.js";
 
 const PROTOCOL_VERSION = 4;
 const DEFAULT_URL = "ws://127.0.0.1:18789";
@@ -134,46 +135,75 @@ export class GatewayClient extends EventEmitter {
     thinking: ThinkingLevel;
     deliver?: boolean;
     attachments?: unknown[];
+    runId?: string;
   }): Promise<{ runId: string }> {
-    const runId = randomUUID();
-    const message = [input.message, this.buildFileAccessContext(input.attachments)].filter(Boolean).join("\n\n");
-    await this.request("chat.send", {
+    const runId = input.runId ?? randomUUID();
+    const activeRun: ActiveRunStatus = {
       sessionKey: input.sessionKey,
-      message,
-      thinking: input.thinking,
-      deliver: input.deliver ?? false,
-      idempotencyKey: runId,
-    });
-    this.setStatus({ state: "running", detail: "Run accepted" });
+      runId,
+      startedAt: Date.now(),
+      activity: "Sending request",
+    };
+    this.setStatus({ state: "running", detail: "OpenClaw running", activeRun });
+    const context = buildFileAccessContext(this.options.settings, input.attachments);
+    const message = buildWireMessage(input.message, context);
+    try {
+      await this.request("chat.send", {
+        sessionKey: input.sessionKey,
+        message,
+        thinking: input.thinking,
+        deliver: input.deliver ?? false,
+        idempotencyKey: runId,
+      });
+    } catch (error) {
+      this.setStatus({ state: "error", detail: error instanceof Error ? error.message : String(error), activeRun: undefined });
+      throw error;
+    }
+    this.setStatus({ state: "running", detail: "Run accepted", activeRun: { ...activeRun, activity: "Run accepted" } });
     return { runId };
   }
 
-  private buildFileAccessContext(attachments?: unknown[]): string {
-    const roots = this.options.settings.fileAccessPaths ?? [];
-    const lines: string[] = [];
-    if (roots.length > 0) {
-      lines.push(
-        "<openclaw_desktop_file_access>",
-        "The user has granted OpenClaw Desktop access to these Windows roots. You may use filesystem tools directly; do not ask the user to attach files that are under these roots.",
-        "Resolve Windows paths through WSL drive mounts. If the user mentions a folder/file by name or a partial path, search/list within these roots first.",
-      );
-      for (const root of roots) {
-        lines.push(`- Windows: ${root}`);
-        lines.push(`  WSL: ${windowsPathToWslInline(root)}`);
+  async cancelRun(input: CancelRunInput): Promise<CancelRunResult> {
+    const current = this.status.activeRun;
+    const activeRun: ActiveRunStatus =
+      current?.runId === input.runId && current.sessionKey === input.sessionKey
+        ? current
+        : { sessionKey: input.sessionKey, runId: input.runId, startedAt: Date.now() };
+
+    this.setStatus({
+      state: this.status.state === "streaming" ? "streaming" : "running",
+      detail: "Cancelling run",
+      activeRun: { ...activeRun, activity: "Cancelling run", cancelRequested: true },
+    });
+
+    const params = { sessionKey: input.sessionKey, runId: input.runId, idempotencyKey: input.runId };
+    const methods = ["chat.abort", "chat.cancel"];
+    for (const method of methods) {
+      try {
+        await this.request(method, params, { timeoutMs: 10000 });
+        this.setStatus({
+          state: this.status.state === "streaming" ? "streaming" : "running",
+          detail: "Cancel requested",
+          activeRun: { ...activeRun, activity: "Cancel requested", cancelRequested: true },
+        });
+        return { ok: true, message: "Cancel requested" };
+      } catch (error) {
+        if (this.isUnsupportedRpc(error)) {
+          continue;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        this.setStatus({ state: "error", detail: `Cancel failed: ${message}`, activeRun });
+        return { ok: false, message };
       }
-      lines.push("</openclaw_desktop_file_access>");
     }
-    if (attachments?.length) {
-      lines.push(
-        "<openclaw_desktop_attachments>",
-        ...attachments.map((item) => {
-          const record = item as { name?: string; wslPath?: string; windowsPath?: string };
-          return `- ${record.name ?? "file"}: ${record.wslPath ?? record.windowsPath ?? ""}`;
-        }),
-        "</openclaw_desktop_attachments>",
-      );
-    }
-    return lines.join("\n");
+
+    const message = "Cancel not supported by Gateway";
+    this.setStatus({
+      state: this.status.state === "streaming" ? "streaming" : "running",
+      detail: message,
+      activeRun: { ...activeRun, activity: message, cancelRequested: false },
+    });
+    return { ok: false, unsupported: true, message };
   }
 
   private openSocket(): void {
@@ -350,28 +380,68 @@ export class GatewayClient extends EventEmitter {
 
   private updateStatusFromEvent(frame: GatewayEventFrame): void {
     if (frame.event === "chat") {
-      const payload = frame.payload as { state?: string; message?: { model?: string; provider?: string } } | undefined;
+      const payload = frame.payload as { sessionKey?: string; runId?: string; state?: string; message?: { model?: string; provider?: string } } | undefined;
       if (payload?.state === "delta") {
-        this.setStatus({ state: "streaming", detail: "Streaming reply" });
+        this.setStatus({ state: "streaming", detail: "Streaming reply", activeRun: this.activeRunFor(payload, "Streaming reply") });
       }
       if (payload?.state === "final" || payload?.state === "aborted" || payload?.state === "error") {
         this.setStatus({
           state: payload.state === "error" ? "error" : "idle",
-          detail: payload.state === "error" ? "Run failed" : "Idle",
+          detail: payload.state === "error" ? "Run failed" : payload.state === "aborted" ? "Run cancelled" : "Idle",
+          activeRun: this.shouldClearActiveRun(payload) ? undefined : this.status.activeRun,
           model: payload.message?.model,
           provider: payload.message?.provider,
         });
       }
     }
     if (frame.event === "agent") {
-      const payload = frame.payload as { stream?: string; data?: { phase?: string } } | undefined;
+      const payload = frame.payload as { sessionKey?: string; runId?: string; stream?: string; data?: { phase?: string; name?: unknown; isError?: unknown } } | undefined;
       if (payload?.stream === "lifecycle" && payload.data?.phase === "start") {
-        this.setStatus({ state: "running", detail: "Agent running" });
+        this.setStatus({ state: "running", detail: "Agent running", activeRun: this.activeRunFor(payload, "Agent running") });
       }
       if (payload?.stream === "tool") {
-        this.setStatus({ state: "streaming", detail: "Tool running" });
+        const toolName = typeof payload.data?.name === "string" ? payload.data.name : "tool";
+        const isResult = payload.data?.phase === "result";
+        const activity = isResult ? `${payload.data?.isError ? "Tool failed" : "Tool complete"}: ${toolName}` : `Tool: ${toolName}`;
+        this.setStatus({
+          state: isResult ? "running" : "streaming",
+          detail: activity,
+          activeRun: this.activeRunFor(payload, activity, { toolName }),
+        });
       }
     }
+  }
+
+  private activeRunFor(payload: { sessionKey?: string; runId?: string } | undefined, activity: string, extra?: Partial<ActiveRunStatus>): ActiveRunStatus | undefined {
+    const current = this.status.activeRun;
+    const sessionKey = payload?.sessionKey ?? current?.sessionKey;
+    const runId = payload?.runId ?? current?.runId;
+    if (!sessionKey || !runId) {
+      return current ? { ...current, activity, ...extra } : undefined;
+    }
+    const sameRun = current?.sessionKey === sessionKey && current.runId === runId;
+    return {
+      sessionKey,
+      runId,
+      startedAt: sameRun ? current.startedAt : Date.now(),
+      cancelRequested: sameRun ? current.cancelRequested : undefined,
+      activity,
+      ...extra,
+    };
+  }
+
+  private shouldClearActiveRun(payload: { sessionKey?: string; runId?: string } | undefined): boolean {
+    const current = this.status.activeRun;
+    if (!current) {
+      return true;
+    }
+    return (!payload?.sessionKey || payload.sessionKey === current.sessionKey) && (!payload?.runId || payload.runId === current.runId);
+  }
+
+  private isUnsupportedRpc(error: unknown): boolean {
+    const code = error instanceof GatewayRequestError ? error.gatewayCode.toUpperCase() : "";
+    const message = error instanceof Error ? error.message : String(error);
+    return ["METHOD_NOT_FOUND", "UNKNOWN_METHOD", "UNIMPLEMENTED", "NOT_FOUND", "UNSUPPORTED"].includes(code) || /method.*not found|unknown method|not implemented|unsupported/i.test(message);
   }
 
   private setStatus(status: Partial<GatewayStatus>): void {
@@ -495,12 +565,3 @@ export class GatewayClient extends EventEmitter {
   }
 }
 
-function windowsPathToWslInline(windowsPath: string): string {
-  const normalized = windowsPath.replaceAll("/", "\\");
-  const match = normalized.match(/^([A-Za-z]):\\?(.*)$/);
-  if (!match) {
-    return windowsPath.replaceAll("\\", "/");
-  }
-  const rest = match[2] ? `/${match[2].replaceAll("\\", "/")}` : "";
-  return `/mnt/${match[1].toLowerCase()}${rest}`;
-}
