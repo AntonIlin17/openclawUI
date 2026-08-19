@@ -2,6 +2,13 @@
   "name": "openclaw-desktop",
   "version": "0.1.2",
   "description": "Native Windows desktop client for OpenClaw Gateway",
+  "author": "Anton Ilin",
+  "license": "MIT",
+  "homepage": "https://github.com/AntonIlin17/openclawUI#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AntonIlin17/openclawUI.git"
+  },
   "private": true,
   "type": "module",
   "main": "dist/main/main.js",
@@ -14,38 +21,46 @@
     "generate:icons": "tsx scripts/generate-icons.ts",
     "dist": "npm run build && electron-builder --win nsis",
     "release": "npm run build && electron-builder --win nsis --publish always",
-    "typecheck": "tsc --noEmit"
+    "package:smoke": "npm run build && electron-builder --win dir --publish never",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.0.0",
-    "electron-updater": "^6.8.3",
-    "highlight.js": "^11.11.1",
-    "html2pdf.js": "^0.12.0",
+    "electron-updater": "^6.8.9",
+    "highlight.js": "^11.12.0",
     "katex": "^0.16.22",
     "lucide-react": "^0.468.0",
-    "mermaid": "^11.12.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "mermaid": "^11.17.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@types/node": "^22.10.7",
-    "@types/react": "^19.0.7",
-    "@types/react-dom": "^19.0.3",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@types/ws": "^8.5.13",
-    "concurrently": "^9.1.2",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.2.4",
     "cross-env": "^7.0.3",
-    "electron": "^34.0.0",
-    "electron-builder": "^25.1.8",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.11.0",
     "png-to-ico": "^2.1.8",
-    "sharp": "^0.33.5",
-    "tsx": "^4.19.2",
+    "sharp": "^0.35.3",
+    "tsx": "^4.23.12",
     "typescript": "^5.8.0",
-    "vite": "^6.0.7",
+    "typescript-eslint": "^8.67.0",
+    "vite": "^6.4.3",
     "wait-on": "^8.0.1"
   },
   "build": {
@@ -70,7 +85,7 @@
         }
       ],
       "icon": "assets/icon.ico",
-      "signAndEditExecutable": false
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,

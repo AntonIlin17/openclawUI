@@ -24,13 +24,19 @@ export type AppSettings = {
   port: number;
   wslDistro: string;
   gatewayCommand: string;
-  /** Run in WSL before the gateway when the app opens (e.g. `ollama serve`). */
-  modelStartCommand?: string;
+  /** A reviewed command selected by the app, never an arbitrary renderer command. */
+  modelStartCommand?: "" | "ollama serve";
   /** Start the OpenClaw gateway in WSL when the desktop app opens. */
   autoStartGateway: boolean;
   authMode: "auto" | "none" | "token" | "password";
   token?: string;
   password?: string;
+  /** Renderer-safe indicators; secret values are never returned over IPC. */
+  hasToken?: boolean;
+  hasPassword?: boolean;
+  /** One-shot renderer requests used to remove a stored secret. */
+  clearToken?: boolean;
+  clearPassword?: boolean;
   autostart: boolean;
   fileAccessPaths: string[];
   prefetchFileListings: boolean;
@@ -140,4 +146,11 @@ export type IpcEvents = {
   "tray:new-conversation": void;
   "tray:history": void;
   "app:settings": AppSettings;
+  "logs:entry": {
+    ts: string;
+    level: "debug" | "info" | "warn" | "error";
+    scope: string;
+    message: string;
+    data?: unknown;
+  };
 };

@@ -1,8 +1,29 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { logger } from "./logger.js";
 import type { AppSettings } from "../shared/types.js";
+import { resolveContainedPaths, windowsPathToWslSafe } from "./path-security.js";
+export { resolveReferencedWslPaths } from "./path-security.js";
+
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+
+export type AllowedWslCommand =
+  | "gateway-start"
+  | "gateway-stop"
+  | "gateway-restart"
+  | "gateway-status"
+  | "doctor"
+  | "model-ollama";
+
+const ALLOWED_LOGIN_COMMANDS: Record<AllowedWslCommand, string> = {
+  "gateway-start": "openclaw gateway start",
+  "gateway-stop": "openclaw gateway stop",
+  "gateway-restart": "openclaw gateway restart",
+  "gateway-status": "openclaw gateway status >/dev/null 2>&1",
+  doctor: "openclaw doctor >/dev/null 2>&1",
+  "model-ollama": "exec ollama serve",
+};
 
 export function runWsl(args: string[], opts?: { timeoutMs?: number; logScope?: string }): Promise<string> {
   const scope = opts?.logScope ?? "wsl";
@@ -21,9 +42,15 @@ export function runWsl(args: string[], opts?: { timeoutMs?: number; logScope?: s
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
+      if (stdout.length + stderr.length > MAX_OUTPUT_BYTES) {
+        child.kill();
+      }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
+      if (stdout.length + stderr.length > MAX_OUTPUT_BYTES) {
+        child.kill();
+      }
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
@@ -33,7 +60,9 @@ export function runWsl(args: string[], opts?: { timeoutMs?: number; logScope?: s
     child.on("close", (code) => {
       clearTimeout(timeout);
       const elapsed = Date.now() - startedAt;
-      if (code === 0) {
+      if (stdout.length + stderr.length > MAX_OUTPUT_BYTES) {
+        reject(new Error("wsl output exceeded the safety limit"));
+      } else if (code === 0) {
         logger.debug(scope, `wsl ok in ${elapsed}ms: ${summary}`, { stdoutBytes: stdout.length });
         resolve(stdout.trim());
       } else {
@@ -46,8 +75,24 @@ export function runWsl(args: string[], opts?: { timeoutMs?: number; logScope?: s
 }
 
 function summarizeArgs(args: string[]): string {
-  const joined = args.join(" ");
+  const joined = args
+    .map((arg, index) => (args[index - 1] === "-lc" ? "[reviewed command]" : arg.length > 120 ? "[long argument]" : arg))
+    .join(" ");
   return joined.length > 200 ? `${joined.slice(0, 200)}…` : joined;
+}
+
+export function runAllowedWslCommand(
+  settings: AppSettings,
+  command: AllowedWslCommand,
+  options?: { timeoutMs?: number; logScope?: string },
+): Promise<string> {
+  return runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", ALLOWED_LOGIN_COMMANDS[command]], options);
+}
+
+export function spawnAllowedWslProcess(settings: AppSettings, command: "gateway-start" | "model-ollama"): ChildProcessWithoutNullStreams {
+  return spawn("wsl.exe", ["-d", settings.wslDistro, "--", "bash", "-ilc", ALLOWED_LOGIN_COMMANDS[command]], {
+    windowsHide: true,
+  });
 }
 
 export async function listDistros(): Promise<string[]> {
@@ -105,12 +150,7 @@ export async function resolveWslIp(settings: AppSettings): Promise<string | null
 }
 
 export function windowsPathToWsl(windowsPath: string): string {
-  const normalized = path.resolve(windowsPath);
-  const match = normalized.match(/^([A-Za-z]):\\(.*)$/);
-  if (!match) {
-    return normalized.replaceAll("\\", "/");
-  }
-  return `/mnt/${match[1].toLowerCase()}/${match[2].replaceAll("\\", "/")}`;
+  return windowsPathToWslSafe(windowsPath);
 }
 
 export async function orientOpenClaw(settings: AppSettings, windowsPaths: string[]): Promise<void> {
@@ -127,14 +167,24 @@ export async function orientOpenClaw(settings: AppSettings, windowsPaths: string
     ...windowsPaths.map((item) => `- ${item} -> ${windowsPathToWsl(item)}`),
     endMarker,
   ];
-  const escaped = lines.join("\n").replaceAll("'", "'\"'\"'");
+  const encoded = Buffer.from(lines.join("\n"), "utf8").toString("base64");
+  const script = [
+    "set -eu",
+    "mkdir -p \"$HOME/.openclaw\"",
+    "touch \"$HOME/.openclaw/AGENTS.md\"",
+    `awk 'BEGIN{skip=0} /${startMarker}/{skip=1; next} /${endMarker}/{skip=0; next} skip==0{print}' \"$HOME/.openclaw/AGENTS.md\" > \"$HOME/.openclaw/AGENTS.md.tmp\"`,
+    "printf '\\n%s\\n' \"$(printf '%s' \"$1\" | base64 -d)\" >> \"$HOME/.openclaw/AGENTS.md.tmp\"",
+    "mv \"$HOME/.openclaw/AGENTS.md.tmp\" \"$HOME/.openclaw/AGENTS.md\"",
+  ].join("; ");
   await runWsl([
     "-d",
     settings.wslDistro,
     "--",
     "sh",
     "-lc",
-    `mkdir -p ~/.openclaw && touch ~/.openclaw/AGENTS.md && awk 'BEGIN{skip=0} /${startMarker}/{skip=1; next} /${endMarker}/{skip=0; next} skip==0{print}' ~/.openclaw/AGENTS.md > ~/.openclaw/AGENTS.md.tmp && printf '\\n%s\\n' '${escaped}' >> ~/.openclaw/AGENTS.md.tmp && mv ~/.openclaw/AGENTS.md.tmp ~/.openclaw/AGENTS.md`,
+    script,
+    "openclaw-desktop",
+    encoded,
   ]);
 }
 
@@ -171,40 +221,25 @@ export async function prefetchDirectoryListing(
 ): Promise<string> {
   const maxDepth = opts?.maxDepth ?? 2;
   const maxEntries = opts?.maxEntries ?? 80;
-  const escaped = wslPath.replaceAll("'", "'\"'\"'");
-  const script = `find '${escaped}' -maxdepth ${maxDepth} \\( -type f -o -type d \\) 2>/dev/null | head -n ${maxEntries}`;
   try {
-    const output = await runWsl(["-d", settings.wslDistro, "--", "sh", "-lc", script], { timeoutMs: 20000 });
-    if (!output.trim()) {
+    const output = await runWsl(
+      ["-d", settings.wslDistro, "--", "find", wslPath, "-maxdepth", String(maxDepth), "(", "-type", "f", "-o", "-type", "d", ")"],
+      { timeoutMs: 20000 },
+    );
+    const limited = output.split(/\r?\n/).slice(0, maxEntries).join("\n");
+    if (!limited.trim()) {
       return `Directory listing for ${wslPath}: (empty or not accessible)`;
     }
-    return `Directory listing for ${wslPath}:\n${output}`;
+    return `Directory listing for ${wslPath}:\n${limited}`;
   } catch (error) {
     return `Directory listing for ${wslPath} failed: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
-export function resolveReferencedWslPaths(message: string, windowsRoots: string[]): string[] {
-  const lower = message.toLowerCase();
-  const hits = new Set<string>();
-  for (const root of windowsRoots) {
-    const wsl = windowsPathToWsl(root);
-    const segments = [
-      ...root.split(/[/\\]/).filter(Boolean),
-      ...wsl.split("/").filter(Boolean),
-    ]
-      .map((item) => item.toLowerCase())
-      .filter((item) => item.length >= 3 && item !== "mnt" && !/^[a-z]$/.test(item));
-    if (segments.some((segment) => lower.includes(segment))) {
-      hits.add(wsl);
-    }
-  }
-  return [...hits];
-}
-
-export async function fileInfoFromPaths(paths: string[]) {
+export async function fileInfoFromPaths(paths: string[], allowedRoots?: string[]) {
+  const resolvedPaths = allowedRoots ? await resolveContainedPaths(paths, allowedRoots) : paths;
   return await Promise.all(
-    paths.map(async (filePath) => {
+    resolvedPaths.map(async (filePath) => {
       const stat = await fs.stat(filePath);
       return {
         id: `${filePath}-${stat.mtimeMs}`,

@@ -1,8 +1,9 @@
-import { app, BrowserWindow, Menu, Tray, ipcMain, dialog, nativeImage, shell } from "electron";
+import { app, BrowserWindow, Menu, Tray, ipcMain, dialog, nativeImage, safeStorage, shell } from "electron";
+import type { IpcMainInvokeEvent } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import electronUpdaterPkg from "electron-updater";
 const { autoUpdater } = electronUpdaterPkg;
@@ -20,25 +21,44 @@ import {
   resolveReferencedWslPaths,
   resolveWslIp,
   runWsl,
+  runAllowedWslCommand,
+  spawnAllowedWslProcess,
   windowsPathToWsl,
 } from "./wsl.js";
 import { exportConversation } from "./export.js";
+import { assertTrustedIpcSender, isSafeExternalUrl, isTrustedRendererUrl } from "./ipc-security.js";
+import { summarizeOpenClawConfig } from "./redaction.js";
+import { createSecretProtector } from "./secure-storage.js";
+import {
+  parseAgentId,
+  parseAppSettings,
+  parseCancelRunInput,
+  parseConversationTitle,
+  parseExportInput,
+  parseHistoryLimit,
+  parseLogLimit,
+  parseOptionalAgentId,
+  parseSendMessageInput,
+  parseSessionKey,
+  parseWindowsPathArray,
+  toRendererSettings,
+} from "../shared/validation.js";
 import type {
   ActiveRunStatus,
   AgentSummary,
   AppSettings,
-  CancelRunInput,
+  Attachment,
   CancelRunResult,
   ChatMessage,
   ConversationSummary,
   GatewayEventFrame,
   GatewayStatus,
   ModelChoice,
-  SendMessageInput,
 } from "../shared/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const rendererDirectory = path.join(__dirname, "../renderer");
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -51,6 +71,7 @@ let settings: AppSettings;
 let gateway: GatewayClient;
 const memoryMessages = new Map<string, ChatMessage[]>();
 const activeRuns = new Map<string, ActiveRunStatus>();
+const attachmentGrants = new Set<string>();
 
 const lock = app.requestSingleInstanceLock();
 if (!lock) {
@@ -66,7 +87,8 @@ app.whenReady().then(async () => {
     packaged: app.isPackaged,
     userData: app.getPath("userData"),
   });
-  settingsStore = new SettingsStore();
+  const secretProtector = createSecretProtector(safeStorage);
+  settingsStore = new SettingsStore(app.getPath("userData"), secretProtector);
   settings = settingsStore.load();
   logger.info("boot", "settings loaded", {
     gatewayUrl: settings.gatewayUrl,
@@ -83,8 +105,14 @@ app.whenReady().then(async () => {
   } catch (error) {
     logger.warn("boot", "auth detection failed", { message: errorMessage(error) });
   }
-  gateway = new GatewayClient({ userData: app.getPath("userData"), settings });
+  gateway = new GatewayClient({
+    userData: app.getPath("userData"),
+    settings,
+    secretProtector,
+    version: app.getVersion(),
+  });
   wireGateway();
+  registerIpc();
   createWindow();
   createTray();
   initAutoUpdater();
@@ -121,9 +149,30 @@ function createWindow(): void {
       preload,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
+      webviewTag: false,
     },
   });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const trusted = isTrustedRendererUrl(url, {
+      rendererDirectory,
+      devServerUrl: process.env.VITE_DEV_SERVER_URL,
+    });
+    if (!trusted) {
+      event.preventDefault();
+      if (isSafeExternalUrl(url)) {
+        void shell.openExternal(url);
+      }
+    }
+  });
+  mainWindow.webContents.on("will-attach-webview", (event) => event.preventDefault());
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   mainWindow.webContents.on("did-fail-load", (_event, code, description, url) => {
     logger.error("renderer", `did-fail-load`, { code, description, url });
     void mainWindow?.loadURL(errorDataUrl(`Renderer failed to load: ${description}`));
@@ -326,9 +375,20 @@ function ingestGatewayEvent(event: GatewayEventFrame): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle("settings:get", () => settings);
-  ipcMain.handle("settings:save", async (_event, next: AppSettings) => {
-    settings = settingsStore.save(next);
+  type TrustedHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
+  const registerHandler = (channel: string, handler: TrustedHandler): void => {
+    ipcMain.handle(channel, (event, ...args) => {
+      assertTrustedIpcSender(event, {
+        rendererDirectory,
+        devServerUrl: process.env.VITE_DEV_SERVER_URL,
+      });
+      return handler(event, ...args);
+    });
+  };
+
+  registerHandler("settings:get", () => toRendererSettings(settings));
+  registerHandler("settings:save", async (_event, next: unknown) => {
+    settings = settingsStore.save(parseAppSettings(next, settings));
     gateway.updateSettings(settings);
     app.setLoginItemSettings({ openAtLogin: settings.autostart });
     let orientError: string | undefined;
@@ -338,59 +398,69 @@ function registerIpc(): void {
       orientError = error instanceof Error ? error.message : String(error);
       logger.warn("orient", "orientOpenClaw failed", { message: orientError });
     }
-    sendToRenderer("app:settings", settings);
-    return { settings, orientError };
+    const rendererSettings = toRendererSettings(settings);
+    sendToRenderer("app:settings", rendererSettings);
+    return { settings: rendererSettings, orientError };
   });
-  ipcMain.handle("openclaw:tools-status", async () => {
+  registerHandler("openclaw:tools-status", async () => {
     const config = await readOpenClawConfig(settings);
     return { toolsEnabled: detectToolsEnabled(config) };
   });
-  ipcMain.handle("gateway:status", () => gateway.getStatus());
-  ipcMain.handle("gateway:connect", async () => {
+  registerHandler("gateway:status", () => gateway.getStatus());
+  registerHandler("gateway:connect", async () => {
     gateway.start();
     return gateway.getStatus();
   });
-  ipcMain.handle("gateway:start", async () => {
+  registerHandler("gateway:start", async () => {
     await ensureServicesReady("manual");
     gateway.start();
     return gateway.getStatus();
   });
-  ipcMain.handle("gateway:stop", async () => {
+  registerHandler("gateway:stop", async () => {
     await stopGatewayProcess();
     return gateway.getStatus();
   });
-  ipcMain.handle("gateway:restart", async () => restartGateway());
-  ipcMain.handle("agents:list", async (): Promise<AgentSummary[]> => {
+  registerHandler("gateway:restart", async () => restartGateway());
+  registerHandler("agents:list", async (): Promise<AgentSummary[]> => {
     const result = await gateway.request<{ agents?: AgentSummary[] }>("agents.list", {});
     return result.agents ?? [{ id: "main", name: "Main" }];
   });
-  ipcMain.handle("models:list", async (): Promise<ModelChoice[]> => {
+  registerHandler("models:list", async (): Promise<ModelChoice[]> => {
     const result = await gateway.request<{ models?: ModelChoice[] }>("models.list", {});
     return result.models ?? [];
   });
-  ipcMain.handle("sessions:list", async (_event, agentId?: string): Promise<ConversationSummary[]> => {
+  registerHandler("sessions:list", async (_event, rawAgentId?: unknown): Promise<ConversationSummary[]> => {
+    const agentId = parseOptionalAgentId(rawAgentId);
     const result = await gateway.request<{ sessions?: Array<Record<string, unknown>> }>("sessions.list", { agentId, limit: 200 });
     return (result.sessions ?? []).map(normalizeSession);
   });
-  ipcMain.handle("sessions:create", async (_event, agentId: string): Promise<ConversationSummary> => {
+  registerHandler("sessions:create", async (_event, rawAgentId: unknown): Promise<ConversationSummary> => {
+    const agentId = parseAgentId(rawAgentId);
     const localKey = `desktop-${Date.now().toString(36)}`;
     const result = await gateway.request<Record<string, unknown>>("sessions.create", { agentId, key: localKey, label: "New conversation" });
     return normalizeSession({ ...result, key: String(result.key ?? `agent:${agentId}:${localKey}`), agentId });
   });
-  ipcMain.handle("sessions:rename", async (_event, key: string, title: string) => {
+  registerHandler("sessions:rename", async (_event, rawKey: unknown, rawTitle: unknown) => {
+    const key = parseSessionKey(rawKey);
+    const title = parseConversationTitle(rawTitle);
     await gateway.request("sessions.patch", { key, label: title, displayName: title });
   });
-  ipcMain.handle("sessions:delete", async (_event, key: string) => {
+  registerHandler("sessions:delete", async (_event, rawKey: unknown) => {
+    const key = parseSessionKey(rawKey);
     await gateway.request("sessions.reset", { key, reason: "reset" });
     memoryMessages.delete(key);
   });
-  ipcMain.handle("history:load", async (_event, sessionKey: string, limit = 200) => {
+  registerHandler("history:load", async (_event, rawSessionKey: unknown, rawLimit?: unknown) => {
+    const sessionKey = parseSessionKey(rawSessionKey);
+    const limit = parseHistoryLimit(rawLimit);
     const result = await gateway.request("chat.history", { sessionKey, limit });
     memoryMessages.set(sessionKey, normalizeHistory(result));
     sendToRenderer("conversation:messages", { sessionKey, messages: memoryMessages.get(sessionKey) ?? [] });
     return result;
   });
-  ipcMain.handle("chat:send", async (_event, input: SendMessageInput) => {
+  registerHandler("chat:send", async (_event, rawInput: unknown) => {
+    const input = parseSendMessageInput(rawInput);
+    input.attachments = await normalizeAuthorizedAttachments(input.attachments ?? []);
     const existing = memoryMessages.get(input.sessionKey) ?? [];
     const runId = randomUUID();
     const createdAt = Date.now();
@@ -435,7 +505,8 @@ function registerIpc(): void {
       throw error;
     }
   });
-  ipcMain.handle("chat:cancel", async (_event, input: CancelRunInput): Promise<CancelRunResult> => {
+  registerHandler("chat:cancel", async (_event, rawInput: unknown): Promise<CancelRunResult> => {
+    const input = parseCancelRunInput(rawInput);
     const activeRun = activeRuns.get(input.sessionKey);
     if (!activeRun || activeRun.runId !== input.runId) {
       return { ok: true, message: "No active run" };
@@ -443,29 +514,45 @@ function registerIpc(): void {
     activeRuns.set(input.sessionKey, { ...activeRun, activity: "Cancelling run", cancelRequested: true });
     return await gateway.cancelRun(input);
   });
-  ipcMain.handle("path:translate", (_event, windowsPath: string) => windowsPathToWsl(windowsPath));
-  ipcMain.handle("paths:choose", async () => {
+  registerHandler("path:translate", (_event, rawWindowsPath: unknown) => {
+    const [windowsPath] = parseWindowsPathArray([rawWindowsPath], "windowsPath", 1);
+    return windowsPathToWsl(windowsPath);
+  });
+  registerHandler("paths:choose", async () => {
     const result = await dialog.showOpenDialog({ properties: ["openDirectory", "multiSelections"] });
     return result.canceled ? [] : result.filePaths;
   });
-  ipcMain.handle("files:choose", async () => {
+  registerHandler("files:choose", async () => {
     const result = await dialog.showOpenDialog({ properties: ["openFile", "multiSelections"] });
-    return result.canceled ? [] : await fileInfoFromPaths(result.filePaths);
+    if (result.canceled) {
+      return [];
+    }
+    const files = await fileInfoFromPaths(result.filePaths);
+    grantAttachments(files);
+    return files;
   });
-  ipcMain.handle("openclaw:orient", async (_event, paths: string[]) => orientOpenClaw(settings, paths));
-  ipcMain.handle("files:resolve", (_event, paths: string[]) => fileInfoFromPaths(paths));
-  ipcMain.handle("conversation:export", (_event, input) => exportConversation(input));
-  ipcMain.handle("logs:tail", (_event, limit?: number) => logger.tail(limit ?? 400));
-  ipcMain.handle("logs:open-folder", () => {
+  registerHandler("openclaw:orient", async (_event, rawPaths: unknown) => {
+    const paths = parseWindowsPathArray(rawPaths, "file access paths", 20);
+    return orientOpenClaw(settings, paths);
+  });
+  registerHandler("files:resolve", async (_event, rawPaths: unknown) => {
+    const paths = parseWindowsPathArray(rawPaths, "dropped file paths", 50);
+    const files = await fileInfoFromPaths(paths, settings.fileAccessPaths);
+    grantAttachments(files);
+    return files;
+  });
+  registerHandler("conversation:export", (_event, rawInput: unknown) => exportConversation(parseExportInput(rawInput)));
+  registerHandler("logs:tail", (_event, rawLimit?: unknown) => logger.tail(parseLogLimit(rawLimit)));
+  registerHandler("logs:open-folder", () => {
     logger.openLogDir();
   });
-  ipcMain.handle("logs:open-file", () => shell.openPath(logger.getLogFile()));
-  ipcMain.handle("logs:get-path", () => ({ file: logger.getLogFile(), folder: logger.getLogDir() }));
-  ipcMain.handle("diagnostics:run", async () => {
+  registerHandler("logs:open-file", () => shell.openPath(logger.getLogFile()));
+  registerHandler("logs:get-path", () => ({ file: logger.getLogFile(), folder: logger.getLogDir() }));
+  registerHandler("diagnostics:run", async () => {
     await runGatewayDiagnostics();
     return logger.tail(200);
   });
-  ipcMain.handle("updater:check", async () => {
+  registerHandler("updater:check", async () => {
     if (!app.isPackaged) {
       return { ok: false, reason: "dev-mode", version: app.getVersion() };
     }
@@ -482,7 +569,38 @@ function registerIpc(): void {
   });
 }
 
-registerIpc();
+function grantAttachments(files: Attachment[]): void {
+  for (const file of files) {
+    if (file.windowsPath) {
+      attachmentGrants.add(attachmentGrantKey(file.windowsPath));
+    }
+  }
+}
+
+async function normalizeAuthorizedAttachments(attachments: Attachment[]): Promise<Attachment[]> {
+  const normalized: Attachment[] = [];
+  for (const attachment of attachments) {
+    if (attachment.dataUrl) {
+      normalized.push({
+        id: attachment.id,
+        name: attachment.name,
+        type: attachment.type,
+        dataUrl: attachment.dataUrl,
+      });
+      continue;
+    }
+    if (!attachment.windowsPath || !attachmentGrants.has(attachmentGrantKey(attachment.windowsPath))) {
+      throw new Error("Attachment was not selected through the system file picker or an allowed folder");
+    }
+    const [resolved] = await fileInfoFromPaths([attachment.windowsPath]);
+    normalized.push(resolved);
+  }
+  return normalized;
+}
+
+function attachmentGrantKey(filePath: string): string {
+  return path.win32.resolve(filePath).toLowerCase();
+}
 
 async function ensureServicesReady(reason: string): Promise<void> {
   if (gatewayWarmupInFlight) {
@@ -530,15 +648,13 @@ async function ensureWslSubsystemReady(): Promise<void> {
 async function probeOpenClawPath(): Promise<void> {
   try {
     const output = await runWsl(
-      ["-d", settings.wslDistro, "--", "bash", "-ilc", "command -v openclaw || which openclaw || true; echo '---'; echo \"PATH=$PATH\""],
+      ["-d", settings.wslDistro, "--", "bash", "-ilc", "command -v openclaw >/dev/null 2>&1 && printf present || printf missing"],
       { timeoutMs: 10_000, logScope: "openclaw-probe" },
     );
-    const [pathLine, ...rest] = output.split("---");
-    const resolved = pathLine.trim();
-    if (!resolved) {
-      logger.warn("openclaw-probe", "openclaw NOT found on PATH inside WSL", { wslPath: rest.join("---").trim() });
+    if (output.trim() !== "present") {
+      logger.warn("openclaw-probe", "openclaw not found on PATH inside WSL");
     } else {
-      logger.info("openclaw-probe", "openclaw resolved", { binary: resolved, wslPath: rest.join("---").trim() });
+      logger.info("openclaw-probe", "openclaw resolved on PATH");
     }
   } catch (error) {
     logger.warn("openclaw-probe", "probe failed", { message: errorMessage(error) });
@@ -563,8 +679,7 @@ async function ensureWslDistroReady(timeoutMs = 60_000): Promise<void> {
 }
 
 async function startModelProcess(): Promise<void> {
-  const command = settings.modelStartCommand?.trim();
-  if (!command) {
+  if (settings.modelStartCommand !== "ollama serve") {
     logger.debug("model", "no modelStartCommand configured — skipping");
     return;
   }
@@ -572,10 +687,8 @@ async function startModelProcess(): Promise<void> {
     logger.debug("model", "model process already running");
     return;
   }
-  logger.info("model", `starting model: ${command}`);
-  modelProcess = spawn("wsl.exe", ["-d", settings.wslDistro, "--", "bash", "-ilc", command], {
-    windowsHide: true,
-  });
+  logger.info("model", "starting reviewed local model command");
+  modelProcess = spawnAllowedWslProcess(settings, "model-ollama");
   logger.attachChild("model", modelProcess);
   modelProcess.on("exit", (code, signal) => {
     logger.info("model", `model process exited`, { code, signal });
@@ -593,11 +706,8 @@ async function startGatewayProcess(): Promise<void> {
     logger.debug("gateway-proc", "gateway process already running");
     return;
   }
-  const command = settings.gatewayCommand || "openclaw gateway start";
-  logger.info("gateway-proc", `spawning gateway`, { command, distro: settings.wslDistro });
-  gatewayProcess = spawn("wsl.exe", ["-d", settings.wslDistro, "--", "bash", "-ilc", command], {
-    windowsHide: true,
-  });
+  logger.info("gateway-proc", "spawning reviewed gateway command", { distro: settings.wslDistro });
+  gatewayProcess = spawnAllowedWslProcess(settings, "gateway-start");
   logger.attachChild("gateway-proc", gatewayProcess);
   gatewayProcess.on("exit", (code, signal) => {
     logger.info("gateway-proc", `gateway process exited`, { code, signal });
@@ -606,20 +716,26 @@ async function startGatewayProcess(): Promise<void> {
 }
 
 async function runGatewayDiagnostics(): Promise<void> {
-  const commands: Array<{ label: string; cmd: string; timeoutMs: number }> = [
-    { label: "openclaw doctor", cmd: "openclaw doctor 2>&1 || true", timeoutMs: 30_000 },
-    { label: "openclaw gateway status", cmd: "openclaw gateway status 2>&1 || true", timeoutMs: 15_000 },
-    { label: "gateway healthz", cmd: `curl -sS -m 3 ${settings.gatewayUrl.replace(/^ws/, "http").replace(/\/$/, "")}/healthz || true`, timeoutMs: 10_000 },
-    { label: "openclaw config", cmd: "cat ~/.openclaw/openclaw.json 2>&1 | head -n 80 || true", timeoutMs: 10_000 },
+  const config = await readOpenClawConfig(settings);
+  logger.info("diag", "OpenClaw configuration summary", summarizeOpenClawConfig(config));
+  const commands = [
+    { label: "openclaw doctor", command: "doctor" as const, timeoutMs: 30_000 },
+    { label: "openclaw gateway status", command: "gateway-status" as const, timeoutMs: 15_000 },
   ];
   for (const item of commands) {
     try {
-      const output = await runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", item.cmd], { timeoutMs: item.timeoutMs, logScope: "diag" });
-      logger.info("diag", item.label, { output: output.slice(0, 4000) });
+      await runAllowedWslCommand(settings, item.command, { timeoutMs: item.timeoutMs, logScope: "diag" });
+      logger.info("diag", item.label, { ok: true });
     } catch (error) {
-      logger.warn("diag", `${item.label} failed`, { message: errorMessage(error) });
+      logger.warn("diag", item.label, { ok: false, reason: errorMessage(error) });
     }
   }
+  logger.info("diag", "gateway health", { ok: await probeGateway(settings.gatewayUrl) });
+  let encryptedStorageAvailable = false;
+  try {
+    encryptedStorageAvailable = safeStorage.isEncryptionAvailable();
+  } catch {}
+  logger.info("diag", "encrypted credential storage", { available: encryptedStorageAvailable });
 }
 
 async function waitForGateway(url: string, timeoutMs: number): Promise<boolean> {
@@ -642,7 +758,7 @@ function sleep(ms: number): Promise<void> {
 async function stopGatewayProcess(): Promise<void> {
   gateway.stop();
   try {
-    await runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", "openclaw gateway stop"], { timeoutMs: 15000, logScope: "gateway-proc" });
+    await runAllowedWslCommand(settings, "gateway-stop", { timeoutMs: 15000, logScope: "gateway-proc" });
   } catch {}
   gatewayProcess?.kill();
   gatewayProcess = null;
@@ -651,7 +767,7 @@ async function stopGatewayProcess(): Promise<void> {
 async function restartGateway(): Promise<GatewayStatus> {
   gateway.stop();
   try {
-    await runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", "openclaw gateway restart"], { timeoutMs: 30000, logScope: "gateway-proc" });
+    await runAllowedWslCommand(settings, "gateway-restart", { timeoutMs: 30000, logScope: "gateway-proc" });
   } catch {
     await startGatewayProcess();
   }
@@ -685,10 +801,6 @@ function assetPath(name: string): string {
   return app.isPackaged ? path.join(app.getAppPath(), "assets", name) : path.join(process.cwd(), "assets", name);
 }
 
-function writeLog(message: string): void {
-  logger.info("legacy", message);
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -707,10 +819,14 @@ function buildAppMenu(): Menu {
     {
       label: "View",
       submenu: [
-        { role: "reload" },
-        { role: "forceReload" },
-        { role: "toggleDevTools" },
-        { type: "separator" },
+        ...(isDev
+          ? [
+              { role: "reload" as const },
+              { role: "forceReload" as const },
+              { role: "toggleDevTools" as const },
+              { type: "separator" as const },
+            ]
+          : []),
         { role: "resetZoom" },
         { role: "zoomIn" },
         { role: "zoomOut" },
@@ -790,7 +906,17 @@ async function manualCheckForUpdates(): Promise<void> {
 }
 
 function errorDataUrl(message: string): string {
-  return `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><body style="margin:0;background:#141414;color:#f4efe7;font-family:Segoe UI;padding:32px"><h1>OpenClaw Desktop</h1><p>${message}</p><p>Log: ${path.join(app.getPath("userData"), "openclaw-desktop.log")}</p></body></html>`)}`;
+  const safeMessage = escapeHtml(message);
+  return `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><body style="margin:0;background:#141414;color:#f4efe7;font-family:Segoe UI;padding:32px"><h1>OpenClaw Desktop</h1><p>${safeMessage}</p><p>Open Settings → Diagnostics for recovery details.</p></body></html>`)}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function normalizeSession(raw: Record<string, unknown>): ConversationSummary {
@@ -866,7 +992,7 @@ function upsertModelThinking(messages: ChatMessage[], runId: string, modelThinki
   if (existing) {
     const marker = "## Model reasoning\n";
     if (existing.content.includes(marker)) {
-      const [prefix, rest] = existing.content.split(marker);
+      const [prefix] = existing.content.split(marker);
       const combined = `${prefix}${marker}${trimmed}`;
       existing.content = combined.trim();
       return;

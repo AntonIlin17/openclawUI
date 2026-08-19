@@ -1,4 +1,14 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
+
+const eventChannels = new Set([
+  "gateway:event",
+  "gateway:status",
+  "conversation:messages",
+  "tray:new-conversation",
+  "tray:history",
+  "app:settings",
+  "logs:entry",
+]);
 
 const api = {
   getSettings: () => ipcRenderer.invoke("settings:get"),
@@ -23,7 +33,10 @@ const api = {
   chooseAttachmentFiles: () => ipcRenderer.invoke("files:choose"),
   orientOpenClaw: (paths) => ipcRenderer.invoke("openclaw:orient", paths),
   exportConversation: (input) => ipcRenderer.invoke("conversation:export", input),
-  resolveDroppedFiles: (paths) => ipcRenderer.invoke("files:resolve", paths),
+  resolveDroppedFiles: (files) => ipcRenderer.invoke(
+    "files:resolve",
+    files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
+  ),
   tailLogs: (limit) => ipcRenderer.invoke("logs:tail", limit),
   openLogsFolder: () => ipcRenderer.invoke("logs:open-folder"),
   openLogFile: () => ipcRenderer.invoke("logs:open-file"),
@@ -31,10 +44,13 @@ const api = {
   runDiagnostics: () => ipcRenderer.invoke("diagnostics:run"),
   checkForUpdates: () => ipcRenderer.invoke("updater:check"),
   on: (channel, handler) => {
+    if (!eventChannels.has(channel)) {
+      throw new Error("Unsupported IPC event channel");
+    }
     const listener = (_event, payload) => handler(payload);
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.off(channel, listener);
   },
 };
 
-contextBridge.exposeInMainWorld("openclaw", api);
+contextBridge.exposeInMainWorld("openclaw", Object.freeze(api));

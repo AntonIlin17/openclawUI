@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, safeStorage } from "electron";
 import type { AppSettings } from "../shared/types.js";
+import { parseAppSettings } from "../shared/validation.js";
+import { SecretCodec, type SecretProtector } from "./secure-storage.js";
 
-const DEFAULT_SETTINGS: AppSettings = {
+export const DEFAULT_SETTINGS: AppSettings = {
   gatewayUrl: "ws://127.0.0.1:18789",
   host: "127.0.0.1",
   port: 18789,
@@ -18,13 +19,21 @@ const DEFAULT_SETTINGS: AppSettings = {
   thinking: "brief",
 };
 
-type StoredSettings = Omit<AppSettings, "token" | "password"> & {
+type StoredSettings = Omit<
+  AppSettings,
+  "token" | "password" | "hasToken" | "hasPassword" | "clearToken" | "clearPassword"
+> & {
   token?: string;
   password?: string;
 };
 
 export class SettingsStore {
-  constructor(private userData = app.getPath("userData")) {}
+  private readonly codec: SecretCodec;
+  private volatileSecrets: Pick<AppSettings, "token" | "password"> = {};
+
+  constructor(private readonly userData: string, protector: SecretProtector) {
+    this.codec = new SecretCodec(protector);
+  }
 
   get settingsPath(): string {
     return path.join(this.userData, "settings.json");
@@ -36,53 +45,52 @@ export class SettingsStore {
       stored = JSON.parse(fs.readFileSync(this.settingsPath, "utf8")) as Partial<StoredSettings>;
     } catch {}
     const merged = { ...DEFAULT_SETTINGS, ...stored };
-    merged.gatewayUrl = merged.gatewayUrl || `ws://${merged.host}:${merged.port}`;
-    return {
+    const candidate = {
       ...merged,
-      token: this.decrypt(stored.token),
-      password: this.decrypt(stored.password),
+      gatewayUrl: merged.gatewayUrl || `ws://${merged.host}:${merged.port}`,
+      token: this.volatileSecrets.token ?? this.codec.decode(stored.token),
+      password: this.volatileSecrets.password ?? this.codec.decode(stored.password),
     };
+    try {
+      return parseAppSettings(candidate);
+    } catch {
+      return {
+        ...DEFAULT_SETTINGS,
+        token: candidate.token,
+        password: candidate.password,
+      };
+    }
   }
 
   save(settings: AppSettings): AppSettings {
+    const validated = parseAppSettings(settings, settings);
+    this.volatileSecrets = { token: validated.token, password: validated.password };
     const stored: StoredSettings = {
-      ...settings,
-      gatewayUrl: settings.gatewayUrl || `ws://${settings.host}:${settings.port}`,
-      token: this.encrypt(settings.token),
-      password: this.encrypt(settings.password),
+      gatewayUrl: validated.gatewayUrl,
+      host: validated.host,
+      port: validated.port,
+      wslDistro: validated.wslDistro,
+      gatewayCommand: validated.gatewayCommand,
+      modelStartCommand: validated.modelStartCommand,
+      autoStartGateway: validated.autoStartGateway,
+      authMode: validated.authMode,
+      autostart: validated.autostart,
+      fileAccessPaths: validated.fileAccessPaths,
+      prefetchFileListings: validated.prefetchFileListings,
+      preferredModel: validated.preferredModel,
+      thinking: validated.thinking,
+      token: this.codec.encode(validated.token),
+      password: this.codec.encode(validated.password),
     };
     fs.mkdirSync(path.dirname(this.settingsPath), { recursive: true });
-    fs.writeFileSync(this.settingsPath, JSON.stringify(stored, null, 2));
+    fs.writeFileSync(this.settingsPath, JSON.stringify(stored, null, 2), { mode: 0o600 });
+    try {
+      fs.chmodSync(this.settingsPath, 0o600);
+    } catch {}
     return this.load();
   }
 
   merge(settings: Partial<AppSettings>): AppSettings {
     return this.save({ ...this.load(), ...settings });
-  }
-
-  private encrypt(value?: string): string | undefined {
-    if (!value) {
-      return undefined;
-    }
-    try {
-      if (safeStorage.isEncryptionAvailable()) {
-        return `safe:${safeStorage.encryptString(value).toString("base64")}`;
-      }
-    } catch {}
-    return value;
-  }
-
-  private decrypt(value?: string): string | undefined {
-    if (!value) {
-      return undefined;
-    }
-    if (!value.startsWith("safe:")) {
-      return value;
-    }
-    try {
-      return safeStorage.decryptString(Buffer.from(value.slice(5), "base64"));
-    } catch {
-      return undefined;
-    }
   }
 }

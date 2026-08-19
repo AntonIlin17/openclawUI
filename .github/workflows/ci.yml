@@ -1,0 +1,43 @@
+name: Verify
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  windows-package-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package:smoke
+      - name: Verify unpacked application
+        shell: pwsh
+        run: |
+          $executable = Get-ChildItem -Path release -Recurse -Filter "OpenClaw Desktop.exe" | Select-Object -First 1
+          if (-not $executable) { throw "Packaged executable was not produced" }
+          Write-Host "Verified $($executable.FullName)"
