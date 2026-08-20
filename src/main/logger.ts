@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { redactSensitive, redactString } from "./redaction.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -77,7 +78,12 @@ class Logger extends EventEmitter {
       const entries: LogEntry[] = [];
       for (const line of slice) {
         try {
-          entries.push(JSON.parse(line) as LogEntry);
+          const parsed = JSON.parse(line) as LogEntry;
+          entries.push({
+            ...parsed,
+            message: redactString(String(parsed.message ?? "")),
+            data: redactSensitive(parsed.data),
+          });
         } catch {
           entries.push({ ts: new Date().toISOString(), level: "info", scope: "raw", message: line });
         }
@@ -131,8 +137,8 @@ class Logger extends EventEmitter {
       ts: new Date().toISOString(),
       level,
       scope,
-      message,
-      data,
+      message: redactString(message),
+      data: redactSensitive(data),
     };
     this.ring.push(entry);
     if (this.ring.length > MAX_RING) {
@@ -181,7 +187,7 @@ function safeUserData(): string {
 
 function safeJson(value: unknown): string {
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(redactSensitive(value));
   } catch {
     return String(value);
   }

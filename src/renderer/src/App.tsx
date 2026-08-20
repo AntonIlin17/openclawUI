@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  AlertTriangle,
   Bot,
   Check,
   ChevronDown,
@@ -13,10 +14,13 @@ import {
   Pencil,
   Play,
   Plus,
+  RefreshCw,
   Search,
   Settings,
   Square,
   Trash2,
+  Wifi,
+  WifiOff,
   X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -44,6 +48,10 @@ import type { LogEntry } from "../../shared/ipc";
 const blankStatus: GatewayStatus = { state: "connecting", detail: "Starting" };
 
 function App() {
+  const [bootState, setBootState] = useState<"loading" | "ready" | "error">("loading");
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [historyState, setHistoryState] = useState<"idle" | "loading" | "error">("idle");
+  const [actionError, setActionError] = useState<string | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [status, setStatus] = useState<GatewayStatus>(blankStatus);
   const [agents, setAgents] = useState<AgentSummary[]>([]);
@@ -56,6 +64,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyFocused, setHistoryFocused] = useState(false);
 
+  // The bridge subscriptions intentionally bind once; refs keep active IDs current.
   useEffect(() => {
     void boot();
     const offStatus = window.openclaw.on<GatewayStatus>("gateway:status", setStatus);
@@ -81,7 +90,7 @@ function App() {
       offNew();
       offHistory();
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeKeyRef = useRef(activeKey);
   const activeAgentRef = useRef(activeAgent);
@@ -93,38 +102,66 @@ function App() {
   }, [activeAgent]);
 
   async function boot() {
-    const [nextSettings, nextStatus] = await Promise.all([window.openclaw.getSettings(), window.openclaw.getStatus()]);
-    setSettings(nextSettings);
-    setStatus(nextStatus);
-    const [nextAgents, nextModels] = await Promise.all([
-      window.openclaw.listAgents().catch(() => [{ id: "main", name: "Main" }]),
-      window.openclaw.listModels().catch(() => []),
-    ]);
-    setAgents(nextAgents.length ? nextAgents : [{ id: "main", name: "Main" }]);
-    setModels(nextModels);
-    const defaultAgent = nextAgents[0]?.id ?? "main";
-    setActiveAgent(defaultAgent);
-    await refreshConversations(defaultAgent, true);
+    setBootState("loading");
+    setBootError(null);
+    try {
+      const [nextSettings, nextStatus] = await Promise.all([window.openclaw.getSettings(), window.openclaw.getStatus()]);
+      setSettings(nextSettings);
+      setStatus(nextStatus);
+      const [nextAgents, nextModels] = await Promise.all([
+        window.openclaw.listAgents().catch(() => [{ id: "main", name: "Main" }]),
+        window.openclaw.listModels().catch(() => []),
+      ]);
+      setAgents(nextAgents.length ? nextAgents : [{ id: "main", name: "Main" }]);
+      setModels(nextModels);
+      const defaultAgent = nextAgents[0]?.id ?? "main";
+      setActiveAgent(defaultAgent);
+      await refreshConversations(defaultAgent, true);
+      setBootState("ready");
+    } catch (error) {
+      setBootError(error instanceof Error ? error.message : String(error));
+      setBootState("error");
+    }
   }
 
   async function refreshConversations(agentId: string, openFirst = false) {
-    const list = await window.openclaw.listConversations(agentId).catch(() => []);
-    setConversations(list);
-    if (openFirst && list[0]) {
-      await openConversation(list[0].key);
+    setHistoryState("loading");
+    try {
+      const list = await window.openclaw.listConversations(agentId);
+      setConversations(list);
+      if (openFirst && list[0]) {
+        await openConversation(list[0].key);
+      } else {
+        setHistoryState("idle");
+      }
+    } catch (error) {
+      setActionError(`Could not load sessions: ${error instanceof Error ? error.message : String(error)}`);
+      setHistoryState("error");
     }
   }
 
   async function createConversation(agentId: string) {
-    const created = await window.openclaw.createConversation(agentId);
-    setConversations((items) => [created, ...items.filter((item) => item.key !== created.key)]);
-    await openConversation(created.key);
+    setActionError(null);
+    try {
+      const created = await window.openclaw.createConversation(agentId);
+      setConversations((items) => [created, ...items.filter((item) => item.key !== created.key)]);
+      await openConversation(created.key);
+    } catch (error) {
+      setActionError(`Could not create a session: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   async function openConversation(key: string) {
     setActiveKey(key);
     setMessages([]);
-    await window.openclaw.loadHistory(key, 200).catch(() => undefined);
+    setHistoryState("loading");
+    try {
+      await window.openclaw.loadHistory(key, 200);
+      setHistoryState("idle");
+    } catch (error) {
+      setActionError(`Could not load this session: ${error instanceof Error ? error.message : String(error)}`);
+      setHistoryState("error");
+    }
   }
 
   const filtered = useMemo(() => {
@@ -216,19 +253,50 @@ function App() {
             }
           }}
         />
-        {activeKey ? (
+        <ConnectionNotice
+          status={status}
+          onConnect={() => void window.openclaw.connectGateway().catch((error) => setActionError(String(error)))}
+          onStart={() => void window.openclaw.startGateway().catch((error) => setActionError(String(error)))}
+          onSettings={() => setSettingsOpen(true)}
+        />
+        {actionError ? (
+          <div className="action-error" role="alert">
+            <AlertTriangle size={16} />
+            <span>{actionError}</span>
+            <button onClick={() => setActionError(null)} title="Dismiss"><X size={14} /></button>
+          </div>
+        ) : null}
+        {bootState === "loading" ? (
+          <LoadingState title="Preparing OpenClaw Desktop" detail="Checking the local Gateway and loading sessions…" />
+        ) : bootState === "error" ? (
+          <RecoveryState
+            title="OpenClaw Desktop could not finish starting"
+            detail={bootError ?? "The local services did not respond."}
+            onRetry={() => void boot()}
+            onSettings={() => setSettingsOpen(true)}
+          />
+        ) : activeKey ? (
           <ChatView
             messages={messages}
             sessionKey={activeKey}
             settings={settings}
             activeRun={activeRun}
+            historyState={historyState}
             onCancelRun={() => void cancelActiveRun()}
             onSent={(input) => {
-              void window.openclaw.sendMessage(input);
+              setActionError(null);
+              void window.openclaw.sendMessage(input).catch((error) => {
+                setActionError(`Message failed: ${error instanceof Error ? error.message : String(error)}`);
+              });
             }}
           />
         ) : (
-          <EmptyState onStart={() => void createConversation(activeAgent)} />
+          <EmptyState
+            firstRun={conversations.length === 0}
+            connected={["idle", "connected", "running", "streaming"].includes(status.state)}
+            onStart={() => void createConversation(activeAgent)}
+            onSettings={() => setSettingsOpen(true)}
+          />
         )}
       </main>
       {settings && settingsOpen ? (
@@ -310,12 +378,9 @@ function Header(props: {
         </div>
       </div>
       <div className="power-controls">
-        <select value={props.settings?.preferredModel ?? ""} onChange={() => undefined}>
-          <option value="">{props.conversation?.model ?? "Default model"}</option>
-          {props.models.map((model) => (
-            <option key={model.id} value={model.id}>{model.provider}/{model.name}</option>
-          ))}
-        </select>
+        <span className="model-readout" title="The model is selected by the OpenClaw session">
+          {props.conversation?.model ?? props.status.model ?? props.models[0]?.name ?? "Default model"}
+        </span>
         <span className={`status-pill ${props.status.state}`}>{isRunActive ? `running ${formatElapsed(elapsedMs)}` : props.status.state}</span>
         <span className="tokens">{props.conversation?.totalTokens ?? props.status.totalTokens ?? 0} tokens</span>
         {isRunActive ? (
@@ -336,6 +401,7 @@ function ChatView(props: {
   sessionKey: string;
   settings: AppSettings | null;
   activeRun?: ActiveRunStatus;
+  historyState: "idle" | "loading" | "error";
   onCancelRun: () => void;
   onSent: (input: { sessionKey: string; message: string; thinking: ThinkingLevel; attachments: Attachment[] }) => void;
 }) {
@@ -364,11 +430,11 @@ function ChatView(props: {
     setAttachments([]);
   }
 
-  async function attachFiles(paths?: string[]) {
-    if (!paths?.length) {
+  async function attachFiles(files?: File[]) {
+    if (!files?.length) {
       return;
     }
-    const resolved = await window.openclaw.resolveDroppedFiles(paths);
+    const resolved = await window.openclaw.resolveDroppedFiles(files);
     setAttachments((items) => [...items, ...resolved]);
   }
 
@@ -382,13 +448,18 @@ function ChatView(props: {
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => {
           event.preventDefault();
-          const paths = [...event.dataTransfer.files].map((file) => file.path).filter(Boolean);
-          void attachFiles(paths);
+          void attachFiles([...event.dataTransfer.files]);
         }}
       >
-        {props.messages.map((message) => (
-          <MessageRow key={message.id} message={message} />
-        ))}
+        {props.historyState === "loading" && props.messages.length === 0 ? (
+          <LoadingState title="Loading session" detail="Retrieving conversation history from the local Gateway…" compact />
+        ) : props.historyState === "error" && props.messages.length === 0 ? (
+          <div className="conversation-empty"><AlertTriangle size={20} /><strong>Session history is unavailable</strong><span>Reconnect, then open this session again.</span></div>
+        ) : props.messages.length === 0 ? (
+          <div className="conversation-empty"><Bot size={20} /><strong>Ready when you are</strong><span>Send a message or attach a file selected through an allowed folder.</span></div>
+        ) : (
+          props.messages.map((message) => <MessageRow key={message.id} message={message} />)
+        )}
       </div>
       <div className="composer-wrap">
         {attachments.length ? (
@@ -501,6 +572,10 @@ function Markdown({ content }: { content: string }) {
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
       components={{
+        a(props) {
+          const href = typeof props.href === "string" && /^https?:\/\//i.test(props.href) ? props.href : undefined;
+          return <a {...props} href={href} target={href ? "_blank" : undefined} rel={href ? "noreferrer noopener" : undefined} />;
+        },
         code(props) {
           const { className, children } = props;
           const match = /language-(\w+)/.exec(className || "");
@@ -533,7 +608,7 @@ function Markdown({ content }: { content: string }) {
 function Mermaid({ code }: { code: string }) {
   const [svg, setSvg] = useState("");
   useEffect(() => {
-    mermaid.initialize({ startOnLoad: false, theme: "dark" });
+    mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
     void mermaid.render(`m-${crypto.randomUUID()}`, code).then((result) => setSvg(result.svg)).catch(() => setSvg(""));
   }, [code]);
   return svg ? <div className="diagram" dangerouslySetInnerHTML={{ __html: svg }} /> : <pre>{code}</pre>;
@@ -543,13 +618,70 @@ function ChartBlock({ code }: { code: string }) {
   return <pre className="chart-block">{code}</pre>;
 }
 
-function EmptyState({ onStart }: { onStart: () => void }) {
+function ConnectionNotice(props: {
+  status: GatewayStatus;
+  onConnect: () => void;
+  onStart: () => void;
+  onSettings: () => void;
+}) {
+  if (["idle", "connected", "running", "streaming"].includes(props.status.state)) {
+    return null;
+  }
+  const connecting = props.status.state === "connecting";
+  return (
+    <div className={`connection-notice ${props.status.state}`} role={props.status.state === "error" ? "alert" : "status"}>
+      {connecting ? <RefreshCw className="spin" size={17} /> : <WifiOff size={17} />}
+      <div>
+        <strong>{connecting ? "Connecting to the local Gateway" : "Local Gateway unavailable"}</strong>
+        <span>{props.status.detail ?? "Check WSL, OpenClaw, and the Gateway settings."}</span>
+      </div>
+      {!connecting ? <button onClick={props.onConnect}><Wifi size={15} /> Reconnect</button> : null}
+      {!connecting ? <button onClick={props.onStart}><Play size={15} /> Start Gateway</button> : null}
+      <button onClick={props.onSettings}><Settings size={15} /> Settings</button>
+    </div>
+  );
+}
+
+function LoadingState({ title, detail, compact = false }: { title: string; detail: string; compact?: boolean }) {
+  return (
+    <div className={`state-panel loading-state ${compact ? "compact" : ""}`} role="status">
+      <RefreshCw className="spin" size={22} />
+      <strong>{title}</strong>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
+function RecoveryState(props: { title: string; detail: string; onRetry: () => void; onSettings: () => void }) {
+  return (
+    <div className="state-panel recovery-state" role="alert">
+      <AlertTriangle size={24} />
+      <strong>{props.title}</strong>
+      <span>{props.detail}</span>
+      <div><button className="new-button" onClick={props.onRetry}><RefreshCw size={15} /> Retry</button><button onClick={props.onSettings}>Open Settings</button></div>
+    </div>
+  );
+}
+
+function EmptyState(props: { firstRun: boolean; connected: boolean; onStart: () => void; onSettings: () => void }) {
   return (
     <div className="empty">
       <div className="empty-mark">C</div>
-      <h1>OpenClaw Desktop</h1>
-      <p>Pick up a session or start a fresh conversation with your local Gateway.</p>
-      <button className="new-button" onClick={onStart}><Plus size={16} /> New conversation</button>
+      <span className="eyebrow">Private by design · local Gateway</span>
+      <h1>{props.firstRun ? "Set up your local workspace" : "OpenClaw Desktop"}</h1>
+      <p>{props.firstRun ? "Connect to OpenClaw in WSL, then create a session. Credentials stay in OS-protected storage." : "Pick up a session or start a fresh conversation with your local Gateway."}</p>
+      {props.firstRun ? (
+        <div className="first-run-steps">
+          <span><strong>1</strong> Confirm WSL and OpenClaw are installed</span>
+          <span><strong>2</strong> Review Gateway and authentication settings</span>
+          <span><strong>3</strong> Connect and create your first local session</span>
+        </div>
+      ) : null}
+      <div className="empty-actions">
+        <button className="new-button" disabled={!props.connected} onClick={props.onStart}><Plus size={16} /> New conversation</button>
+        <button onClick={props.onSettings}><Settings size={16} /> Review Settings</button>
+      </div>
+      {!props.connected ? <span className="empty-hint">Connect the Gateway before creating a session.</span> : null}
     </div>
   );
 }
@@ -585,13 +717,23 @@ function SettingsModal(props: {
         <div className="settings-grid">
           <label>Gateway URL<input value={draft.gatewayUrl} onChange={(e) => setDraft({ ...draft, gatewayUrl: e.target.value })} /></label>
           <label>WSL distro<input value={draft.wslDistro} onChange={(e) => setDraft({ ...draft, wslDistro: e.target.value })} /></label>
-          <label>Gateway command<input value={draft.gatewayCommand} onChange={(e) => setDraft({ ...draft, gatewayCommand: e.target.value })} /></label>
-          <label>Local model command (optional)<input value={draft.modelStartCommand ?? ""} placeholder="e.g. ollama serve" onChange={(e) => setDraft({ ...draft, modelStartCommand: e.target.value })} /></label>
-          <p className="settings-hint">Runs in WSL before the gateway when the app opens. Leave empty if your gateway command already starts the model.</p>
+          <label>Gateway command<input value={draft.gatewayCommand} readOnly aria-readonly="true" /></label>
+          <label>Local model service
+            <select
+              value={draft.modelStartCommand ?? ""}
+              onChange={(e) => setDraft({ ...draft, modelStartCommand: e.target.value as "" | "ollama serve" })}
+            >
+              <option value="">Managed outside the app</option>
+              <option value="ollama serve">Ollama</option>
+            </select>
+          </label>
+          <p className="settings-hint">Commands are selected from a reviewed allow-list and cannot contain renderer-provided shell syntax.</p>
           <label className="toggle"><input type="checkbox" checked={draft.autoStartGateway} onChange={(e) => setDraft({ ...draft, autoStartGateway: e.target.checked })} /> Start gateway when app opens</label>
           <label>Auth<select value={draft.authMode} onChange={(e) => setDraft({ ...draft, authMode: e.target.value as AppSettings["authMode"] })}><option value="auto">Auto</option><option value="none">None</option><option value="token">Token</option><option value="password">Password</option></select></label>
-          <label>Token<input type="password" value={draft.token ?? ""} onChange={(e) => setDraft({ ...draft, token: e.target.value })} /></label>
-          <label>Password<input type="password" value={draft.password ?? ""} onChange={(e) => setDraft({ ...draft, password: e.target.value })} /></label>
+          <label>Token<input type="password" value={draft.token ?? ""} placeholder={draft.hasToken ? "Stored securely — enter to replace" : "Optional"} onChange={(e) => setDraft({ ...draft, token: e.target.value, clearToken: false })} /></label>
+          {draft.hasToken && !draft.clearToken ? <button className="clear-secret" onClick={() => setDraft({ ...draft, token: "", clearToken: true, hasToken: false })}>Clear saved token</button> : null}
+          <label>Password<input type="password" value={draft.password ?? ""} placeholder={draft.hasPassword ? "Stored securely — enter to replace" : "Optional"} onChange={(e) => setDraft({ ...draft, password: e.target.value, clearPassword: false })} /></label>
+          {draft.hasPassword && !draft.clearPassword ? <button className="clear-secret" onClick={() => setDraft({ ...draft, password: "", clearPassword: true, hasPassword: false })}>Clear saved password</button> : null}
           <label>Thinking<select value={draft.thinking} onChange={(e) => setDraft({ ...draft, thinking: e.target.value as ThinkingLevel })}><option value="none">None</option><option value="brief">Brief</option><option value="detailed">Detailed</option></select></label>
           <label className="toggle"><input type="checkbox" checked={draft.autostart} onChange={(e) => setDraft({ ...draft, autostart: e.target.checked })} /> Launch on startup</label>
         </div>
@@ -650,9 +792,9 @@ function SettingsModal(props: {
           <strong>WSL setup checklist</strong>
           <ol>
             <li><code>ls /mnt/c/Users/&lt;you&gt;/...</code> — confirm the folder is visible in WSL</li>
-            <li><code>cat ~/.openclaw/openclaw.json</code> — inspect agent tool settings</li>
-            <li><code>openclaw doctor</code> — run diagnostics</li>
-            <li>Restart gateway from the header after config changes</li>
+            <li><code>openclaw doctor</code> — verify the local installation without copying configuration into logs</li>
+            <li><code>openclaw gateway status</code> — confirm the Gateway lifecycle</li>
+            <li>Restart the Gateway from Diagnostics after reviewed changes</li>
           </ol>
         </div>
         <div className="modal-actions">
@@ -796,16 +938,15 @@ function DiagnosticsPanel() {
 }
 
 function useElapsedMs(startedAt?: number, active = false): number {
-  const [now, setNow] = useState(Date.now());
+  const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (!active || !startedAt) {
       return;
     }
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    const timer = window.setInterval(() => setElapsed(Math.max(0, Date.now() - startedAt)), 1000);
     return () => window.clearInterval(timer);
   }, [active, startedAt]);
-  return active && startedAt ? Math.max(0, now - startedAt) : 0;
+  return active && startedAt ? elapsed : 0;
 }
 
 function formatStatusLine(status: GatewayStatus, elapsedMs: number): string {
@@ -862,6 +1003,14 @@ function startVoice(setText: React.Dispatch<React.SetStateAction<string>>, setRe
     setText((previous) => `${previous}${previous && transcript ? " " : ""}${transcript}`);
   };
   recognition.start();
+}
+
+if (import.meta.env.DEV) {
+  const showcase = new URLSearchParams(window.location.search).get("showcase");
+  if (["cover", "connection", "session", "settings", "diagnostics"].includes(showcase ?? "")) {
+    const { installShowcaseApi } = await import("./showcase-api");
+    installShowcaseApi(showcase as "cover" | "connection" | "session" | "settings" | "diagnostics");
+  }
 }
 
 try {

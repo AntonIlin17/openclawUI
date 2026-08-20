@@ -1,0 +1,51 @@
+{
+  "title": "OpenClaw Desktop",
+  "githubUrl": "https://github.com/AntonIlin17/openclawUI",
+  "approvedReleaseUrl": "https://github.com/AntonIlin17/openclawUI/releases/tag/v0.1.2",
+  "role": "Desktop application engineering, security hardening, product UX, test automation, and release engineering",
+  "stack": [
+    "Electron",
+    "React",
+    "TypeScript",
+    "Vite",
+    "Node.js",
+    "WebSocket",
+    "WSL",
+    "Vitest",
+    "ESLint",
+    "GitHub Actions"
+  ],
+  "summary": "A Windows desktop client for working with a local OpenClaw gateway in WSL, professionalized around secure process boundaries, resilient connectivity, clear recovery states, and repeatable Windows delivery.",
+  "verifiedHighlights": [
+    "Renderer-to-main IPC payloads and senders are validated at runtime.",
+    "Renderer-controlled shell text was replaced with closed command allowlists and positional arguments.",
+    "Diagnostics expose allow-listed summaries and recursively redact secrets and personal paths.",
+    "Settings and device credentials use Electron safeStorage when available, without a new plaintext fallback.",
+    "Gateway lifecycle, request correlation, reconnect backoff, settings storage, path conversion, IPC validation, and redaction have automated coverage.",
+    "Lint, type checking, automated tests, production build, and a Windows unpacked-package smoke test pass locally.",
+    "The dependency audit reports zero known vulnerabilities."
+  ],
+  "limitations": [
+    "OpenClaw Desktop currently targets Windows 10/11 with WSL2 and systemd.",
+    "The gateway is intentionally restricted to local/private WebSocket endpoints; remote deployment and multi-user administration are out of scope.",
+    "Code signing and automatic release publication require maintainer-managed credentials and approval.",
+    "The showcase uses synthetic development data and is not a live service demonstration."
+  ],
+  "caseStudy": {
+    "challenge": "Turn an early desktop client into a portfolio-ready, maintainable application without exposing local OpenClaw data or disrupting the existing release history.",
+    "approach": [
+      "Reconciled the newest accessible source against the public default branch by Git commit and tree identity.",
+      "Hardened IPC, WSL execution, navigation, external links, content security policy, filesystem boundaries, diagnostics, and secret storage.",
+      "Added explicit first-run, loading, empty, disconnected, and recovery states using the existing visual language.",
+      "Introduced deterministic tests, CI, and a Windows packaging smoke check.",
+      "Captured the actual renderer with a development-only fake-data adapter for a privacy-safe portfolio package."
+    ],
+    "outcomes": [
+      "No raw OpenClaw configuration is returned by diagnostics.",
+      "No arbitrary command text crosses the renderer-to-main boundary.",
+      "The renderer runs sandboxed behind a restrictive content security policy and navigation controls.",
+      "Six required portfolio media assets document the product with synthetic information only."
+    ],
+    "verification": "Local verification includes ESLint, TypeScript, 16 automated tests, a production build, dependency audit, secret scan, and Windows unpacked-package launch smoke check."
+  }
+}

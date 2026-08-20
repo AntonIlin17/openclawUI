@@ -58,7 +58,7 @@ export type OpenClawDesktopApi = {
   chooseAttachmentFiles(): Promise<Attachment[]>;
   orientOpenClaw(paths: string[]): Promise<void>;
   exportConversation(input: ExportInput): Promise<string | null>;
-  resolveDroppedFiles(paths: string[]): Promise<Attachment[]>;
+  resolveDroppedFiles(files: File[]): Promise<Attachment[]>;
   tailLogs(limit?: number): Promise<LogEntry[]>;
   openLogsFolder(): Promise<void>;
   openLogFile(): Promise<string>;

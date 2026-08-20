@@ -1,10 +1,10 @@
 import { EventEmitter } from "node:events";
 import { randomUUID, createHash, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { WebSocket } from "ws";
 import { buildFileAccessContext, buildWireMessage } from "../shared/message-context.js";
 import type { ActiveRunStatus, AppSettings, CancelRunInput, CancelRunResult, GatewayEventFrame, GatewayStatus, ThinkingLevel } from "../shared/types.js";
+import { SecureJsonStore, type SecretProtector } from "./secure-storage.js";
 
 const PROTOCOL_VERSION = 4;
 const DEFAULT_URL = "ws://127.0.0.1:18789";
@@ -37,7 +37,18 @@ type DeviceIdentity = {
 export type GatewayClientOptions = {
   userData: string;
   settings: AppSettings;
+  secretProtector: SecretProtector;
+  version?: string;
 };
+
+export function nextReconnectBackoff(currentMs: number, random = Math.random): { delayMs: number; nextMs: number } {
+  const bounded = Math.min(Math.max(currentMs, 250), 30_000);
+  const jitter = 0.8 + Math.min(Math.max(random(), 0), 1) * 0.4;
+  return {
+    delayMs: Math.round(bounded * jitter),
+    nextMs: Math.min(bounded * 2, 30_000),
+  };
+}
 
 export class GatewayRequestError extends Error {
   readonly gatewayCode: string;
@@ -71,9 +82,13 @@ export class GatewayClient extends EventEmitter {
   private deviceToken?: string;
   private storedScopes?: string[];
   private status: GatewayStatus = { state: "disconnected", url: DEFAULT_URL };
+  private readonly identityStore: SecureJsonStore<DeviceIdentity>;
+  private readonly tokenStore: SecureJsonStore<{ token?: string; scopes?: string[] }>;
 
   constructor(private options: GatewayClientOptions) {
     super();
+    this.identityStore = new SecureJsonStore(this.identityPath(), options.secretProtector);
+    this.tokenStore = new SecureJsonStore(this.tokenPath(), options.secretProtector);
     this.device = this.loadOrCreateDeviceIdentity();
     this.loadDeviceToken();
   }
@@ -88,6 +103,9 @@ export class GatewayClient extends EventEmitter {
   }
 
   start(): void {
+    if (!this.stopped && (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING || this.reconnectTimer)) {
+      return;
+    }
     this.stopped = false;
     this.setStatus({ state: "connecting", detail: "Connecting to Gateway" });
     this.openSocket();
@@ -125,7 +143,16 @@ export class GatewayClient extends EventEmitter {
         timeout,
       });
     });
-    this.ws.send(JSON.stringify(frame));
+    try {
+      this.ws.send(JSON.stringify(frame));
+    } catch (error) {
+      const pending = this.pending.get(id);
+      this.pending.delete(id);
+      if (pending?.timeout) {
+        clearTimeout(pending.timeout);
+      }
+      pending?.reject(error instanceof Error ? error : new Error(String(error)));
+    }
     return promise;
   }
 
@@ -207,6 +234,9 @@ export class GatewayClient extends EventEmitter {
   }
 
   private openSocket(): void {
+    if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
     this.clearTimers();
     this.nonce = null;
     this.connectSent = false;
@@ -225,7 +255,9 @@ export class GatewayClient extends EventEmitter {
     ws.on("error", (error) => this.handleConnectError(error));
     ws.on("close", (code, reason) => {
       this.flushPending(new Error(`gateway closed (${code}): ${reason.toString()}`));
-      this.ws = null;
+      if (this.ws === ws) {
+        this.ws = null;
+      }
       this.connectSent = false;
       this.clearTimers();
       if (!this.stopped) {
@@ -315,7 +347,7 @@ export class GatewayClient extends EventEmitter {
         client: {
           id: "openclaw-tui",
           displayName: "OpenClaw Desktop",
-          version: "0.1.0",
+          version: this.options.version ?? "0.0.0",
           platform: process.platform,
           mode: "ui",
           instanceId: randomUUID(),
@@ -453,8 +485,9 @@ export class GatewayClient extends EventEmitter {
     if (this.reconnectTimer || this.stopped) {
       return;
     }
-    const delay = this.backoffMs;
-    this.backoffMs = Math.min(this.backoffMs * 2, 30000);
+    const backoff = nextReconnectBackoff(this.backoffMs);
+    const delay = backoff.delayMs;
+    this.backoffMs = backoff.nextMs;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.setStatus({ state: "connecting", detail: "Reconnecting" });
@@ -527,13 +560,14 @@ export class GatewayClient extends EventEmitter {
   }
 
   private loadOrCreateDeviceIdentity(): DeviceIdentity {
-    const identityPath = this.identityPath();
-    try {
-      const parsed = JSON.parse(fs.readFileSync(identityPath, "utf8")) as DeviceIdentity;
-      if (parsed.deviceId && parsed.privateKeyPem && parsed.publicKeyPem) {
-        return parsed;
+    const loaded = this.identityStore.load();
+    const parsed = loaded.value;
+    if (parsed?.deviceId && parsed.privateKeyPem && parsed.publicKeyPem) {
+      if (loaded.legacy) {
+        this.identityStore.migrateLegacy(parsed);
       }
-    } catch {}
+      return parsed;
+    }
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
     const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
     const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -541,8 +575,7 @@ export class GatewayClient extends EventEmitter {
     const raw = publicKeyDer.subarray(publicKeyDer.length - 32);
     const deviceId = createHash("sha256").update(raw).digest("hex");
     const identity = { deviceId, publicKeyPem, privateKeyPem };
-    fs.mkdirSync(path.dirname(identityPath), { recursive: true });
-    fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2));
+    this.identityStore.save(identity);
     return identity;
   }
 
@@ -552,16 +585,16 @@ export class GatewayClient extends EventEmitter {
   }
 
   private loadDeviceToken(): void {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.tokenPath(), "utf8")) as { token?: string; scopes?: string[] };
-      this.deviceToken = parsed.token;
-      this.storedScopes = parsed.scopes;
-    } catch {}
+    const loaded = this.tokenStore.load();
+    this.deviceToken = loaded.value?.token;
+    this.storedScopes = loaded.value?.scopes;
+    if (loaded.legacy && loaded.value) {
+      this.tokenStore.migrateLegacy(loaded.value);
+    }
   }
 
   private saveDeviceToken(): void {
-    fs.mkdirSync(path.dirname(this.tokenPath()), { recursive: true });
-    fs.writeFileSync(this.tokenPath(), JSON.stringify({ token: this.deviceToken, scopes: this.storedScopes }, null, 2));
+    this.tokenStore.save({ token: this.deviceToken, scopes: this.storedScopes });
   }
 }
 

@@ -1,94 +1,98 @@
 # OpenClaw Desktop
 
-OpenClaw Desktop is a native Windows Electron client for a local OpenClaw Gateway running in WSL2. It connects to the Gateway WebSocket directly and does not wrap or scrape `openclaw tui`.
+OpenClaw Desktop is a native Windows client for a local [OpenClaw](https://github.com/openclaw/openclaw) Gateway running in WSL2. It provides session history, streaming chat, tool activity, file-aware prompts, diagnostics, exports, updates, and tray controls without wrapping or scraping a terminal UI.
 
-## Prerequisites
+![OpenClaw Desktop session](showcase/media/session.webp)
 
-- Windows 10/11
-- WSL2 with Ubuntu
-- OpenClaw installed inside Ubuntu
-- A working Gateway config at `~/.openclaw/openclaw.json`
+## Highlights
+
+- Direct WebSocket protocol client with signed device identity, correlated requests, lifecycle state, cancellation, tick monitoring, and bounded reconnect backoff.
+- Windows-to-WSL file workflows with explicit folder grants, realpath containment, safe path conversion, and system-picker attachment grants.
+- Runtime-validated renderer IPC and a sandboxed Electron renderer with CSP, navigation, permission, and external-link controls.
+- OS-protected settings and device credentials through Electron `safeStorage`; plaintext fallback persistence is disabled.
+- Allow-listed diagnostics with recursive credential and personal-path redaction. Raw OpenClaw configuration is never copied into logs.
+- First-run guidance plus deliberate connection, loading, empty, error, and recovery states.
+- Lint, strict type checking, integration/unit tests, GitHub Actions, npm security audit, and a Windows unpacked-app packaging smoke test.
+
+## Status
+
+The public release line remains [v0.1.2](https://github.com/AntonIlin17/openclawUI/releases/tag/v0.1.2). The professionalization work is documented under `Unreleased` in [CHANGELOG.md](CHANGELOG.md); a new release requires a separate approval and is not implied by merging source changes.
+
+## Requirements
+
+- Windows 10 or 11
+- WSL2 with an Ubuntu-compatible distribution
+- OpenClaw installed inside that distribution and available on its login-shell `PATH`
+- A local OpenClaw Gateway (default `ws://127.0.0.1:18789`)
+- Node.js 22+ for development
+
+The app can start the reviewed `openclaw gateway start` command. The only optional model service it can start is `ollama serve`; arbitrary renderer-provided shell commands are rejected.
 
 ## Development
 
 ```powershell
-npm install
-npm run generate:icons
+git clone https://github.com/AntonIlin17/openclawUI.git
+cd openclawUI
+npm ci
 npm run dev:electron
 ```
 
-The app defaults to `ws://127.0.0.1:18789`. If Windows localhost forwarding does not reach WSL, it falls back to the WSL VM IP from `wsl hostname -I`.
-
-## Build Installer
+Quality checks:
 
 ```powershell
-npm run generate:icons
-npm run dist
+npm run verify
+npm audit
+npm run package:smoke
 ```
 
-The NSIS installer is written to `release/`. Code signing placeholders are present in `package.json` via `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`, but signing is optional.
+`package:smoke` builds `release/win-unpacked/OpenClaw Desktop.exe` without generating or publishing an installer. See [Setup](docs/SETUP.md) for the complete workflow.
 
-## Gateway Protocol
+## Security model
 
-The client mirrors the OpenClaw TUI path verified from the official docs and source:
+The renderer is treated as untrusted input. Main-process IPC handlers authenticate the renderer origin and validate every argument before it can reach settings, the Gateway, the filesystem, WSL, exports, logs, or updates. WSL receives structured arguments or closed, reviewed command identifiers; user strings do not become shell programs.
 
-- WebSocket JSON frames
-- pre-connect `connect.challenge`
-- `connect` request with protocol version 4, operator role, admin scope, `tool-events` capability, and signed device identity
-- RPCs: `chat.send`, `chat.history`, `sessions.list`, `sessions.create`, `sessions.patch`, `sessions.reset`, `agents.list`, and `models.list`
-- events: `chat`, `agent`, `btw`, and `sessions.changed`
+Credentials are encrypted with Windows-provided `safeStorage`. If encryption is unavailable, new secrets stay in memory for the current process and are not written as plaintext. Diagnostics expose configuration presence and health booleans—not raw files or command output—and all log data passes through recursive redaction.
 
-## Windows Files From WSL
+Read [Security architecture](docs/SECURITY.md) and [SECURITY.md](SECURITY.md) before reporting or evaluating a vulnerability.
 
-Windows paths are translated before being referenced in chat:
+## Windows file access
 
-- `C:\Users\me\file.pdf` -> `/mnt/c/Users/me/file.pdf`
-- `D:\data\x.csv` -> `/mnt/d/data/x.csv`
+Folder access is opt-in:
 
-Settings **Windows file access** adds allowed folder roots. Saving settings updates a marked section in `~/.openclaw/AGENTS.md` inside WSL so the agent knows which trees to use. The chat UI shows file-access instructions in a collapsible **Thinking** row (not inside your message bubble).
+1. Open **Settings → Windows file access** and select one or more roots.
+2. Save to validate the roots and update the marked OpenClaw Desktop section in `~/.openclaw/AGENTS.md`.
+3. Drop files only from granted roots, or select files explicitly with the system picker.
 
-Optional **prefetch folder listings** runs `find` in WSL when your message mentions an allowed folder, so the agent can summarize even before file tools are configured.
+The app converts `C:\Projects\demo` to `/mnt/c/Projects/demo` without invoking a shell. Dropped paths are resolved and checked against granted roots again in the main process, including symlink/realpath containment.
 
-### Enable file tools in OpenClaw (WSL)
+## Diagnostics
 
-1. Confirm the folder is visible: `ls /mnt/c/Users/<you>/path/to/project`
-2. Inspect config: `cat ~/.openclaw/openclaw.json`
-3. Run: `openclaw doctor`
-4. Restart the gateway from OpenClaw Desktop after changing config
+**Settings → Diagnostics & logs** provides a filterable, redacted log and health checks for:
 
-The Desktop app does not mount drives itself; WSL already exposes `C:\` as `/mnt/c`.
+- OpenClaw configuration readability and allow-listed auth/tool summaries
+- `openclaw doctor` success/failure
+- `openclaw gateway status` success/failure
+- Gateway health endpoint reachability
+- encrypted credential storage availability
 
-## Cold start (after reboot or shutdown)
+The raw `~/.openclaw/openclaw.json`, access tokens, device keys, chats, and OpenClaw user data are never included in diagnostics.
 
-1. Open **OpenClaw Desktop** (or start it from the system tray if you enabled **Launch on startup** in Settings).
-2. The app waits for WSL, optionally runs your **Local model command**, then runs **Gateway command** (default `openclaw gateway start`) and connects when the gateway health check passes.
-3. If the header still shows **disconnected**, open the tray icon → **Start Gateway**, or Settings → confirm **Start gateway when app opens** is enabled → Save.
-4. In WSL you can verify manually: `openclaw gateway status` and `curl -s http://127.0.0.1:18789/healthz`.
+## Documentation
 
-If you use a separate local inference server (for example Ollama), set **Local model command** in Settings to something like `ollama serve` so it starts before the gateway.
+- [Architecture](docs/ARCHITECTURE.md)
+- [Setup and development](docs/SETUP.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Security architecture](docs/SECURITY.md)
+- [Known limitations](docs/LIMITATIONS.md)
+- [Changelog](CHANGELOG.md)
+- [Portfolio case study](showcase/case-study.md)
 
-## Diagnostics & logs
+## Packaging and releases
 
-Every boot the app writes a structured log to `%APPDATA%\OpenClaw Desktop\logs\openclaw-desktop.log`. WSL command output, gateway/model process stdout/stderr, gateway connection errors, and auto-updater events all funnel into this file (and into the in-app log viewer).
+`npm run dist` creates an unsigned NSIS installer under `release/`. `npm run release` can publish through `electron-builder`, but must only be used after a version decision, explicit release approval, passing CI, and review of generated artifacts. The repository keeps the historical `v0.1.1` and `v0.1.2` tags intact.
 
-- **Help → Open log file** / **Open logs folder** — opens the file in your default editor.
-- **Settings → Diagnostics & logs** — live tail of the log inside the app with filtering, plus a **Run gateway diagnostics** button that executes `openclaw doctor`, `openclaw gateway status`, a healthz curl, and dumps `~/.openclaw/openclaw.json` into the log.
-- If the gateway never comes up at boot, diagnostics auto-run after the warmup timeout and after three consecutive connect errors.
+Unsigned Windows builds can trigger SmartScreen; production distribution should use an appropriate code-signing certificate. See [Known limitations](docs/LIMITATIONS.md).
 
-## Auto-update
+## License
 
-Installed builds auto-update from GitHub Releases (`AntonIlin17/openclawUI`). On launch the app checks for a newer release in the background, downloads it, and prompts you to restart. **Help → Check for updates** triggers a manual check.
-
-Publishing a new release:
-
-```powershell
-# bump version in package.json, then:
-$env:GH_TOKEN = "<your github token with repo scope>"
-npm run release
-```
-
-`electron-builder` will build the NSIS installer, sign nothing (signing is disabled), and publish the installer + `latest.yml` to a new GitHub release. Installed clients pick it up on next launch — no manual uninstall/reinstall needed.
-
-## Tray Behavior
-
-Closing the window minimizes to tray. Use the tray menu to open the app, create a conversation, open history, start/stop/restart the Gateway, open Settings, or Exit fully.
+[MIT](LICENSE) © 2026 Anton Ilin. Dependency licenses remain their own; see [Third-party notices](THIRD_PARTY_NOTICES.md).

@@ -28,7 +28,10 @@ export async function exportConversation(input: ExportInput): Promise<string | n
     .role{font-weight:700;margin-top:22px}
   </style></head><body>${markdownToBasicHtml(markdown)}</body></html>`;
   await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-  const pdf = await win.webContents.printToPDF({ printBackground: true, margins: { marginType: "default" } });
+  const pdf = await win.webContents.printToPDF({
+    printBackground: true,
+    margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
+  });
   await fs.writeFile(result.filePath, pdf);
   win.destroy();
   return result.filePath;
