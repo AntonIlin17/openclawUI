@@ -1,0 +1,149 @@
+# OpenClaw Desktop product plan
+
+Status: discovery in progress. Updated October 22, 2026.
+
+This document separates the agreed product direction from proposed implementation.
+Planned features below are not claims about the current app.
+
+## Product purpose
+
+A Windows desktop assistant that makes OpenClaw useful without requiring terminal
+work during normal use. It helps people run recurring tasks, collect online data,
+research questions, and find and organize files on their computer.
+
+The initial setup may assume OpenClaw and Ollama are already installed. Detecting
+them, explaining connection failures, and connecting reliably must be simple.
+
+## Confirmed requirements
+
+- Serve Windows users who want to use OpenClaw without terminal setup or commands.
+- Use local AI models only, with no per-use cloud model API costs.
+- Prioritize scheduled stock-data collection, local storage, and export first.
+- Keep trading execution outside the first release: collect data for a future
+  analysis or trading system, without placing orders.
+- Support online research and searching for information on the web.
+- Support searching chosen folders and searching across the PC. Preview file
+  moves and renames before applying them.
+- Consider codebase assistance later, after the main workflows work well.
+- Use a clean, calm interface with polished typography, visible progress, task
+  cards, file previews, and research results.
+- Improve real functionality before rewriting the GitHub introduction. Then show
+  real screenshots of completed workflows and explain exactly what the app does.
+- Commit and push each coherent set of project changes to GitHub, with descriptive
+  commit messages and validation results.
+
+## Proposed first workflow: scheduled stock-data collection
+
+These are implementation recommendations pending the remaining discovery answers.
+
+1. Let the user choose a watchlist, source, schedule, and local output folder.
+2. Fetch daily open, high, low, close, and volume from a documented data API.
+   Use a replaceable provider adapter; do not ask an AI model to invent or extract
+   numerical prices when a structured API is available.
+3. Store records locally in SQLite and provide CSV exports. Keep provider, feed,
+   symbol, currency, market time, collection time, and adjustment information so
+   downstream analysis can interpret each dataset correctly.
+4. Preserve raw provider responses separately from normalized records. Treat
+   corporate actions, data revisions, and adjustment policies explicitly.
+5. Validate records; detect gaps and duplicates; retry transient failures within
+   provider limits; retain a run history with counts and actionable errors.
+6. Show the next run, current stage, progress, last successful collection, output
+   location, and a preview of the saved data. Clearly identify stale data and
+   partial runs.
+7. Keep provider credentials on the user's machine, out of Git and logs. Publish
+   code and synthetic fixtures, not personal datasets or provider credentials.
+
+Daily collection is a proposed starting point, not a claim that daily data is
+sufficient for every future trading strategy. Intraday data, news, fundamentals,
+and analysis can be added after the collection pipeline is reliable.
+
+### Provider research
+
+Checked against provider documentation on October 22, 2026. Plans and entitlements
+must be rechecked before implementation and when configuring a provider.
+
+- [Massive stock-data plans](https://www.massive.com/stocks): its Basic tier lists
+  end-of-day data, two years of history, and five API calls per minute at no monthly
+  cost. This is a candidate for a small initial US watchlist if a free account is
+  acceptable. Dataset access and permitted use must match the selected plan.
+- [Alpha Vantage support](https://www.alphavantage.co/support/): its standard free
+  service lists 25 requests per day. This limit affects watchlist size and retries.
+- [Alpaca market-data documentation](https://docs.alpaca.markets/us/docs/about-market-data-api)
+  and [FAQ](https://docs.alpaca.markets/us/docs/market-data-faq): distinguish IEX
+  from consolidated SIP coverage and account entitlements. Never silently treat a
+  single-exchange feed as consolidated market data.
+
+No provider account, subscription, API key, or collection schedule has been created.
+
+## Delivery stages
+
+1. **Reliable foundation:** reproduce startup and connection problems; keep
+   settings accessible; show clear service readiness and recovery actions; verify
+   the installed gateway protocol and local model capabilities.
+2. **One complete collection task:** configure, run, validate, save, preview, and
+   export a stock dataset manually before adding scheduling.
+3. **Reliable scheduling:** persist tasks and run history; handle sleep, restarts,
+   missed runs, retries, and duplicate prevention according to the chosen execution
+   model; show progress and useful notifications.
+4. **Usable workspace:** build the calm task-oriented interface around actual run
+   states and outputs; extend it to research and file workflows.
+5. **Public presentation:** rewrite the README around verified features, add real
+   screenshots with non-sensitive example data, explain setup and limitations,
+   and provide reproducible build and release instructions.
+
+## Current baseline and observed issues
+
+- The repository contains an Electron/React/TypeScript Windows client using a
+  direct WebSocket connection to an OpenClaw Gateway in WSL Ubuntu.
+- The current UI centers on chat, sessions, attachments, gateway controls, and
+  diagnostics. It does not yet provide the proposed collection workspace.
+- No automated tests, GitHub Actions workflows, or license file were found in the
+  initial checkout. License choice remains an owner decision.
+- The existing README is mostly technical setup documentation and has no usage
+  screenshots.
+- TypeScript checking and the production build passed on this machine. Vite warns
+  about large bundles; dependencies also emit deprecation warnings during install.
+- The local Electron runtime required repair before the development app launched.
+  This was a local dependency repair, not a source change.
+- Settings exceeded the window height, hiding its bottom controls. The first fix
+  bounds the dialog, enables scrolling, keeps header/actions visible, and sizes
+  checkboxes consistently. Post-change visual verification is still pending.
+- Ollama and the development app were launched. The installed gateway and local
+  model server both responded to health checks after keeping the WSL distro alive.
+  The app remained disconnected: the saved gateway address used the WSL VM IP,
+  while a Windows localhost health request succeeded. Root cause and a durable
+  startup/connection fix still need investigation.
+- A draft settings edit changed the gateway address to localhost, but it was not
+  saved. Do not assume the app is connected or that chat has been verified.
+- Desktop verification was interrupted by the app being minimized and the desktop
+  control reporting user interaction. Build success is not end-to-end validation.
+
+Keep machine-specific settings, model files, personal folder paths, credentials,
+and diagnostic logs out of commits.
+
+## Remaining discovery decisions
+
+- First market: US stocks and ETFs, Canadian listings, or another market.
+- Whether a free market-data account/API key is acceptable, and whether data
+  subscriptions must also be avoided.
+- Scheduling while closed or asleep: tray plus catch-up, a separate background
+  task, or another always-on machine.
+- Initial watchlist, history range, output location, retention, and notifications.
+  Sensible editable defaults can be proposed once provider and execution model
+  are settled.
+- What research results should contain, which file types to prioritize, and the
+  exact file operations supported in the next stage.
+- Which local model best handles task configuration and tool use on the available
+  hardware; evaluate it against concrete tasks before changing the configured model.
+- Public project name and license, after the working product direction is settled.
+
+## Verification and Git workflow
+
+Use focused commits on a development branch and push each completed change set.
+Record what was tested and what remains unverified; do not present a successful
+build as proof that gateway connections, collection, or scheduling work.
+
+For each functional stage, verify a real workflow and its failure cases before
+moving on. Capture documentation screenshots only after the corresponding workflow
+works, using synthetic or non-sensitive example data. Never publish tokens or logs
+that may contain configuration secrets.
