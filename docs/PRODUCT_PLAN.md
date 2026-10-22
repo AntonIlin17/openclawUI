@@ -1,6 +1,7 @@
 # OpenClaw Desktop product plan
 
-Status: discovery in progress. Updated October 22, 2026.
+Status: first-release scope defined; implementation and verification pending.
+Updated October 22, 2026.
 
 This document separates the agreed product direction from proposed implementation.
 Planned features below are not claims about the current app.
@@ -19,6 +20,12 @@ them, explaining connection failures, and connecting reliably must be simple.
 - Serve Windows users who want to use OpenClaw without terminal setup or commands.
 - Use local AI models only, with no per-use cloud model API costs.
 - Prioritize scheduled stock-data collection, local storage, and export first.
+- Target US stocks and ETFs with an editable watchlist in the first release.
+- Prefer data sources that do not require an account. Do not require an API-key
+  signup as the default experience without revisiting that preference.
+- Run scheduled collection while the app is in the tray; catch up after sleep or
+  reopening. The first release does not require an always-on remote machine or a
+  separately installed background task.
 - Keep trading execution outside the first release: collect data for a future
   analysis or trading system, without placing orders.
 - Support online research and searching for information on the web.
@@ -34,10 +41,11 @@ them, explaining connection failures, and connecting reliably must be simple.
 
 ## Proposed first workflow: scheduled stock-data collection
 
-These are implementation recommendations pending the remaining discovery answers.
+The overall scope is agreed. The following technical choices and editable defaults
+are recommendations to validate during implementation.
 
 1. Let the user choose a watchlist, source, schedule, and local output folder.
-2. Fetch daily open, high, low, close, and volume from a documented data API.
+2. Fetch daily open, high, low, close, and volume from a structured data source.
    Use a replaceable provider adapter; do not ask an AI model to invent or extract
    numerical prices when a structured API is available.
 3. Store records locally in SQLite and provide CSV exports. Keep provider, feed,
@@ -52,6 +60,16 @@ These are implementation recommendations pending the remaining discovery answers
    partial runs.
 7. Keep provider credentials on the user's machine, out of Git and logs. Publish
    code and synthetic fixtures, not personal datasets or provider credentials.
+8. Keep tasks running in the tray. On wake or restart, reconcile the last successful
+   market date with the intended schedule and backfill missing sessions. Prevent
+   concurrent and duplicate runs; report what was recovered. A powered-off PC does
+   not collect until it runs again.
+
+Proposed editable defaults: a small example watchlist, one year of daily history,
+one evening refresh at 8 p.m. America/New_York, an app-managed local data folder,
+and notifications for failure or required attention. Use timezone-aware dates and
+provider data availability, rather than assuming every weekday is a trading day.
+Do not present the example watchlist as investment recommendations.
 
 Daily collection is a proposed starting point, not a claim that daily data is
 sufficient for every future trading strategy. Intraday data, news, fundamentals,
@@ -72,6 +90,19 @@ must be rechecked before implementation and when configuring a provider.
   and [FAQ](https://docs.alpaca.markets/us/docs/market-data-faq): distinguish IEX
   from consolidated SIP coverage and account entitlements. Never silently treat a
   single-exchange feed as consolidated market data.
+- [yahoo-finance2](https://github.com/gadicc/yahoo-finance2) and
+  [yfinance](https://ranaroussi.github.io/yfinance/): candidates to evaluate for the
+  preferred no-account workflow. Both are unofficial Yahoo clients. The yfinance
+  documentation describes its research/educational purpose and Yahoo's personal-use
+  terms. A candidate must pass an actual collection and failure-recovery check;
+  do not imply a guaranteed official feed. Keep source availability and data-use
+  terms distinct from the open-source app's license. Check runtime compatibility
+  before choosing a library: the current yahoo-finance2 documentation lists Node
+  22+ support, which may require an Electron/runtime update.
+
+The initial no-account preference takes priority over the earlier API-key provider
+suggestion. Provider choice is not settled by the research list above. CSV import
+can provide a useful fallback without silently substituting or fabricating data.
 
 No provider account, subscription, API key, or collection schedule has been created.
 
@@ -121,16 +152,13 @@ No provider account, subscription, API key, or collection schedule has been crea
 Keep machine-specific settings, model files, personal folder paths, credentials,
 and diagnostic logs out of commits.
 
-## Remaining discovery decisions
+## Remaining implementation decisions
 
-- First market: US stocks and ETFs, Canadian listings, or another market.
-- Whether a free market-data account/API key is acceptable, and whether data
-  subscriptions must also be avoided.
-- Scheduling while closed or asleep: tray plus catch-up, a separate background
-  task, or another always-on machine.
-- Initial watchlist, history range, output location, retention, and notifications.
-  Sensible editable defaults can be proposed once provider and execution model
-  are settled.
+- Validate the no-account provider, runtime compatibility, adjustment behavior,
+  failure handling, and actual historical coverage before committing to it.
+- Implement editable defaults for watchlist, history range, output location,
+  retention, and notifications. The owner delegated unspecified stock-data
+  implementation choices; these do not require another broad discovery round.
 - What research results should contain, which file types to prioritize, and the
   exact file operations supported in the next stage.
 - Which local model best handles task configuration and tool use on the available
