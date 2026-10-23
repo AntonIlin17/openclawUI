@@ -6,10 +6,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import electronUpdaterPkg from "electron-updater";
 const { autoUpdater } = electronUpdaterPkg;
+import { extractText, normalizeHistory } from "./history.js";
 import { GatewayClient } from "./gateway-client.js";
 import { SettingsStore } from "./settings.js";
 import { logger } from "./logger.js";
-import { buildFileAccessContext, splitDesktopContext } from "../shared/message-context.js";
+import { buildFileAccessContext } from "../shared/message-context.js";
 import {
   detectAuth,
   detectToolsEnabled,
@@ -837,52 +838,6 @@ function normalizeSession(raw: Record<string, unknown>): ConversationSummary {
   };
 }
 
-function normalizeHistory(raw: unknown): ChatMessage[] {
-  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const messages = Array.isArray(record.messages) ? record.messages : Array.isArray(record.history) ? record.history : [];
-  const expanded: ChatMessage[] = [];
-  let index = 0;
-  for (const item of messages) {
-    const message = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
-    const rawRole = message.role === "assistant" || message.role === "user" || message.role === "system" ? message.role : "assistant";
-    const text = extractText(message) || "";
-    const createdAt = typeof message.ts === "number" ? message.ts : Date.now() + index;
-    const runId = typeof message.runId === "string" ? message.runId : undefined;
-    if (rawRole === "user") {
-      const { userText, thinkingText } = splitDesktopContext(text);
-      expanded.push({
-        id: String(message.id ?? `history-${index}`),
-        role: "user",
-        content: userText,
-        runId,
-        createdAt,
-      });
-      index += 1;
-      if (thinkingText) {
-        expanded.push({
-          id: `${String(message.id ?? `history-${index}`)}-thinking`,
-          role: "thinking",
-          content: thinkingText,
-          thinkingLabel: "File access context",
-          runId,
-          createdAt: createdAt + 1,
-        });
-        index += 1;
-      }
-      continue;
-    }
-    expanded.push({
-      id: String(message.id ?? `history-${index}`),
-      role: rawRole,
-      content: text,
-      runId,
-      createdAt,
-    });
-    index += 1;
-  }
-  return expanded;
-}
-
 function upsertModelThinking(messages: ChatMessage[], runId: string, modelThinking: string): void {
   const trimmed = modelThinking.trim();
   if (!trimmed) {
@@ -932,28 +887,6 @@ function extractModelThinking(value: unknown): string {
         return "";
       })
       .join("");
-  }
-  return "";
-}
-
-function extractText(value: unknown): string {
-  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  if (typeof record.content === "string") {
-    return record.content;
-  }
-  if (typeof record.text === "string") {
-    return record.text;
-  }
-  if (Array.isArray(record.content)) {
-    return record.content
-      .map((part) => {
-        const block = part && typeof part === "object" ? (part as Record<string, unknown>) : {};
-        return typeof block.text === "string" ? block.text : "";
-      })
-      .join("");
-  }
-  if (record.message) {
-    return extractText(record.message);
   }
   return "";
 }

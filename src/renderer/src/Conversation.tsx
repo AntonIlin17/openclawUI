@@ -332,7 +332,9 @@ function ToolCard({ message }: { message: ChatMessage }) {
             ? "running"
             : message.toolError
               ? "error"
-              : "complete"}
+              : message.toolResult == null
+                ? "requested"
+                : "complete"}
         </span>
       </button>
       {message.toolError ? (
