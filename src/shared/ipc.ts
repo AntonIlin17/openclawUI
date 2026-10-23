@@ -20,6 +20,11 @@ export type ToolsStatus = {
   toolsEnabled: boolean | null;
 };
 
+export type SetupStatus = {
+  ollamaReachable: boolean;
+  configuredModel?: string;
+};
+
 export type LogEntry = {
   ts: string;
   level: "debug" | "info" | "warn" | "error";
@@ -36,6 +41,7 @@ export type UpdateCheckResult = {
 };
 
 export type OpenClawDesktopApi = {
+  getSetupStatus(): Promise<SetupStatus>;
   getSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<SaveSettingsResult>;
   getToolsStatus(): Promise<ToolsStatus>;

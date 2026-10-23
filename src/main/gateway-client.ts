@@ -208,6 +208,12 @@ export class GatewayClient extends EventEmitter {
 
   private openSocket(): void {
     this.clearTimers();
+    const previous = this.ws;
+    this.ws = null;
+    if (previous) {
+      this.flushPending(new Error("gateway connection replaced"));
+      previous.terminate();
+    }
     this.nonce = null;
     this.connectSent = false;
     const url = this.options.settings.gatewayUrl || DEFAULT_URL;
@@ -220,16 +226,17 @@ export class GatewayClient extends EventEmitter {
       return;
     }
     this.ws = ws;
-    ws.on("open", () => this.armChallengeTimeout());
-    ws.on("message", (raw) => this.handleMessage(raw.toString()));
-    ws.on("error", (error) => this.handleConnectError(error));
+    ws.on("open", () => { if (this.ws === ws) this.armChallengeTimeout(); });
+    ws.on("message", (raw) => { if (this.ws === ws) this.handleMessage(raw.toString()); });
+    ws.on("error", (error) => { if (this.ws === ws) this.handleConnectError(error); });
     ws.on("close", (code, reason) => {
+      if (this.ws !== ws) return;
       this.flushPending(new Error(`gateway closed (${code}): ${reason.toString()}`));
       this.ws = null;
       this.connectSent = false;
       this.clearTimers();
       if (!this.stopped) {
-        this.setStatus({ state: "disconnected", detail: reason.toString() || `Gateway closed (${code})` });
+        if (this.status.state !== "error") this.setStatus({ state: "disconnected", detail: reason.toString() || `Gateway closed (${code})` });
         this.scheduleReconnect();
       }
     });

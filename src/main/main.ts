@@ -45,6 +45,7 @@ let tray: Tray | null = null;
 let isQuitting = false;
 let gatewayProcess: ChildProcessWithoutNullStreams | null = null;
 let modelProcess: ChildProcessWithoutNullStreams | null = null;
+let wslKeepAlive: ChildProcessWithoutNullStreams | null = null;
 let gatewayWarmupInFlight: Promise<void> | null = null;
 let settingsStore: SettingsStore;
 let settings: AppSettings;
@@ -101,6 +102,7 @@ app.on("before-quit", () => {
   gateway?.stop();
   gatewayProcess?.kill();
   modelProcess?.kill();
+  wslKeepAlive?.kill();
 });
 
 function createWindow(): void {
@@ -114,7 +116,7 @@ function createWindow(): void {
     height: 820,
     minWidth: 900,
     minHeight: 640,
-    backgroundColor: "#141414",
+    backgroundColor: "#f9faf7",
     title: "OpenClaw Desktop",
     icon: assetPath("icon.png"),
     webPreferences: {
@@ -203,9 +205,12 @@ function wireGateway(): void {
   gateway.on("connect-error", async (detail) => {
     connectErrorCount += 1;
     logger.warn("gateway-conn", "connect-error", { detail, count: connectErrorCount, url: settings.gatewayUrl });
+    // Authentication/protocol failures need to be shown, not treated as an
+    // unreachable host. Changing addresses cannot repair a rejected handshake.
+    if (!/ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND/i.test(String(detail))) return;
     if (settings.host === "127.0.0.1") {
       const ip = await resolveWslIp(settings);
-      if (ip) {
+      if (ip && await probeGateway(`ws://${ip}:${settings.port}`)) {
         logger.info("gateway-conn", `localhost unreachable — switching to WSL IP ${ip}`);
         settings = settingsStore.merge({ host: ip, gatewayUrl: `ws://${ip}:${settings.port}` });
         gateway.updateSettings(settings);
@@ -326,8 +331,21 @@ function ingestGatewayEvent(event: GatewayEventFrame): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle("setup:status", async () => {
+    const [config, ollamaReachable] = await Promise.all([
+      readOpenClawConfig(settings),
+      fetch("http://127.0.0.1:11434/api/tags", { signal: AbortSignal.timeout(3000) }).then(response => response.ok).catch(() => false),
+    ]);
+    const agents = config?.agents as { defaults?: { model?: string | { primary?: string } } } | undefined;
+    const model = agents?.defaults?.model;
+    return { ollamaReachable, configuredModel: typeof model === "string" ? model : model?.primary };
+  });
   ipcMain.handle("settings:get", () => settings);
   ipcMain.handle("settings:save", async (_event, next: AppSettings) => {
+    const address = new URL(next.gatewayUrl);
+    if (!["ws:", "wss:"].includes(address.protocol)) throw new Error("Connection address must use ws:// or wss://");
+    next = { ...next, host: address.hostname, port: Number(address.port || (address.protocol === "wss:" ? 443 : 80)) };
+    gateway.stop();
     settings = settingsStore.save(next);
     gateway.updateSettings(settings);
     app.setLoginItemSettings({ openAtLogin: settings.autostart });
@@ -339,6 +357,7 @@ function registerIpc(): void {
       logger.warn("orient", "orientOpenClaw failed", { message: orientError });
     }
     sendToRenderer("app:settings", settings);
+    gateway.start();
     return { settings, orientError };
   });
   ipcMain.handle("openclaw:tools-status", async () => {
@@ -552,6 +571,12 @@ async function ensureWslDistroReady(timeoutMs = 60_000): Promise<void> {
     attempt += 1;
     try {
       await runWsl(["-d", settings.wslDistro, "--", "echo", "ok"], { timeoutMs: 15_000, logScope: "wsl-warmup" });
+      if (!wslKeepAlive || wslKeepAlive.killed) {
+        wslKeepAlive = spawn("wsl.exe", ["-d", settings.wslDistro, "--", "sleep", "infinity"], { windowsHide: true });
+        logger.attachChild("wsl-lifetime", wslKeepAlive);
+        wslKeepAlive.once("exit", () => { wslKeepAlive = null; });
+        wslKeepAlive.once("error", () => { wslKeepAlive = null; });
+      }
       logger.info("warmup", `wsl distro "${settings.wslDistro}" ready`, { attempts: attempt });
       return;
     } catch (error) {
@@ -673,6 +698,7 @@ function showWindow(): void {
   if (!mainWindow) {
     return;
   }
+  if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
 }
