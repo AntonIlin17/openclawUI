@@ -10,6 +10,7 @@ import type {
   ModelChoice,
   SendMessageInput,
 } from "./types.js";
+import type { LocalModelsState, LocalModelSelection } from "./local-models.js";
 
 export type SaveSettingsResult = {
   settings: AppSettings;
@@ -41,6 +42,8 @@ export type UpdateCheckResult = {
 };
 
 export type OpenClawDesktopApi = {
+  getLocalModels(): Promise<LocalModelsState>;
+  setLocalModel(input: LocalModelSelection): Promise<{ model: string; contextWindow: number }>;
   getSetupStatus(): Promise<SetupStatus>;
   getSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<SaveSettingsResult>;

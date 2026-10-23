@@ -56,7 +56,9 @@ async function renderer(viewport = { width: 1180, height: 780 }) {
   const context = await browser.newContext({ viewport });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
-  page.on("pageerror", error => console.error("RENDERER_ERROR", error.message));
+  page.on("pageerror", (error) =>
+    console.error("RENDERER_ERROR", error.message),
+  );
   await page.addInitScript(() => {
     const events = {};
     const settings = {
@@ -78,8 +80,48 @@ async function renderer(viewport = { width: 1180, height: 780 }) {
         (events[name] || []).forEach((fn) => fn(payload)),
       failSend: false,
       saves: 0,
+      modelSelection: null,
+      modelFailure: false,
+    };
+    const localModels = {
+      defaultModel: "ollama/qwen3.5:9b",
+      contextWindow: 32768,
+      thinking: false,
+      models: [
+        {
+          name: "qwen3.5:9b",
+          sizeBytes: 6600000000,
+          parameterSize: "9B",
+          quantization: "Q4_K_M",
+          tools: true,
+          reasoning: true,
+          vision: true,
+        },
+        {
+          name: "qwen3.6:27b",
+          sizeBytes: 17000000000,
+          parameterSize: "27B",
+          quantization: "Q4_K_M",
+          tools: true,
+          reasoning: true,
+          vision: true,
+        },
+      ],
     };
     window.openclaw = {
+      getLocalModels: async () => localModels,
+      setLocalModel: async (input) => {
+        if (window.__uiTest.modelFailure)
+          throw Error("Fixture model change failed");
+        window.__uiTest.modelSelection = input;
+        localModels.defaultModel = `ollama/${input.model}`;
+        localModels.contextWindow = input.contextWindow;
+        localModels.thinking = input.thinking;
+        return {
+          model: localModels.defaultModel,
+          contextWindow: input.contextWindow,
+        };
+      },
       getSettings: async () => settings,
       getStatus: async () => ({
         state: "disconnected",
@@ -348,6 +390,131 @@ test("minimum supported window scrolls without hiding settings actions", async (
     await f.page.getByRole("tab", { name: "Advanced & diagnostics" }).click();
     await save.scrollIntoViewIfNeeded();
     assert(await save.isVisible());
+  } finally {
+    await f.close();
+  }
+});
+
+test("local model settings apply an explicit installed model, context, and reasoning style", async () => {
+  const f = await renderer();
+  try {
+    await f.page
+      .getByRole("button", { name: "Connection & settings", exact: true })
+      .click();
+    await f.page
+      .getByRole("combobox", { name: "Default local model", exact: true })
+      .selectOption("qwen3.6:27b");
+    await f.page
+      .getByRole("combobox", { name: "Model context size", exact: true })
+      .selectOption("16384");
+    await f.page
+      .getByRole("checkbox", { name: /Use extended reasoning/ })
+      .check();
+    await f.page
+      .getByRole("button", { name: "Use model", exact: true })
+      .click();
+    await f.page
+      .getByRole("status")
+      .filter({ hasText: "qwen3.6:27b is selected" })
+      .waitFor();
+    assert.deepEqual(
+      await f.page.evaluate(() => window.__uiTest.modelSelection),
+      { model: "qwen3.6:27b", contextWindow: 16384, thinking: true },
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("failed model changes keep the selection visible and can be retried", async () => {
+  const f = await renderer();
+  try {
+    await f.page
+      .getByRole("button", { name: "Connection & settings", exact: true })
+      .click();
+    await f.page
+      .getByRole("combobox", { name: "Default local model", exact: true })
+      .selectOption("qwen3.6:27b");
+    await f.page.evaluate(() => {
+      window.__uiTest.modelFailure = true;
+    });
+    await f.page
+      .getByRole("button", { name: "Use model", exact: true })
+      .click();
+    await f.page
+      .getByRole("alert")
+      .filter({ hasText: "Fixture model change failed" })
+      .waitFor();
+    assert.equal(
+      await f.page
+        .getByRole("combobox", { name: "Default local model", exact: true })
+        .inputValue(),
+      "qwen3.6:27b",
+    );
+    assert.equal(
+      await f.page.evaluate(() => window.__uiTest.modelSelection),
+      null,
+    );
+    await f.page.evaluate(() => {
+      window.__uiTest.modelFailure = false;
+    });
+    await f.page
+      .getByRole("button", { name: "Use model", exact: true })
+      .click();
+    await f.page
+      .getByRole("status")
+      .filter({ hasText: "qwen3.6:27b is selected" })
+      .waitFor();
+  } finally {
+    await f.close();
+  }
+});
+
+test("conversation picker passes the current session and is disabled during a run", async () => {
+  const f = await renderer();
+  try {
+    await connect(f.page);
+    await f.page
+      .getByRole("button", { name: "New conversation", exact: true })
+      .first()
+      .click();
+    await f.page
+      .getByRole("textbox", { name: "Message your assistant" })
+      .fill("Create this test conversation");
+    await f.page
+      .getByRole("button", { name: "Send message", exact: true })
+      .click();
+    await f.page.getByText("Fixture reply", { exact: true }).waitFor();
+    await f.page
+      .getByRole("combobox", { name: "Conversation model", exact: true })
+      .selectOption("qwen3.6:27b");
+    await f.page
+      .getByRole("button", { name: "Use model", exact: true })
+      .click();
+    await f.page
+      .getByRole("status")
+      .filter({ hasText: "qwen3.6:27b is selected" })
+      .waitFor();
+    assert.equal(
+      (await f.page.evaluate(() => window.__uiTest.modelSelection)).sessionKey,
+      "fixture-session",
+    );
+    await f.page.evaluate(() =>
+      window.__uiTest.emit("gateway:status", {
+        state: "running",
+        activeRun: {
+          sessionKey: "fixture-session",
+          runId: "fixture-run",
+          startedAt: Date.now(),
+          activity: "Working",
+        },
+      }),
+    );
+    assert(
+      await f.page
+        .getByRole("button", { name: "Use model", exact: true })
+        .isDisabled(),
+    );
   } finally {
     await f.close();
   }

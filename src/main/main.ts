@@ -8,6 +8,10 @@ import electronUpdaterPkg from "electron-updater";
 const { autoUpdater } = electronUpdaterPkg;
 import { extractText, normalizeHistory } from "./history.js";
 import { GatewayClient } from "./gateway-client.js";
+import { createConversationSession } from "./conversations.js";
+import { installedLocalModels } from "./local-models.js";
+import { modelUpdateCommand } from "./model-config.js";
+import { validateLocalModelSelection, type LocalModelSelection } from "../shared/local-models.js";
 import { SettingsStore } from "./settings.js";
 import { logger } from "./logger.js";
 import { buildFileAccessContext } from "../shared/message-context.js";
@@ -48,6 +52,7 @@ let gatewayProcess: ChildProcessWithoutNullStreams | null = null;
 let modelProcess: ChildProcessWithoutNullStreams | null = null;
 let wslKeepAlive: ChildProcessWithoutNullStreams | null = null;
 let gatewayWarmupInFlight: Promise<void> | null = null;
+let modelSelectionInFlight = false;
 let settingsStore: SettingsStore;
 let settings: AppSettings;
 let gateway: GatewayClient;
@@ -332,6 +337,37 @@ function ingestGatewayEvent(event: GatewayEventFrame): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle("models:local-list", async () => {
+    const [models, config] = await Promise.all([installedLocalModels(), readOpenClawConfig(settings)]);
+    const cfg = config as any;
+    const configured = cfg?.agents?.defaults?.model;
+    const defaultModel = typeof configured === "string" ? configured : configured?.primary;
+    const entry = cfg?.models?.providers?.ollama?.models?.find((model: any) => `ollama/${model.id}` === defaultModel);
+    return { models, defaultModel, contextWindow: entry?.params?.num_ctx ?? entry?.contextWindow, thinking: entry?.params?.thinking ?? false };
+  });
+  ipcMain.handle("models:local-select", async (_event, input: LocalModelSelection) => {
+    validateLocalModelSelection(input);
+    if (modelSelectionInFlight) throw new Error("A model change is already in progress.");
+    if (activeRuns.size || gateway.getStatus().activeRun) throw new Error("Wait for the current assistant run to finish before changing models.");
+    modelSelectionInFlight = true;
+    try {
+      const models = await installedLocalModels();
+      const model = models.find(candidate => candidate.name === input.model);
+      if (!model) throw new Error("This local model is not installed. Refresh your model list.");
+      await runWsl(["-d", settings.wslDistro, "--", "bash", "-ilc", modelUpdateCommand(input, model)], { timeoutMs: 15000, logScope: "model-config" });
+      settings = settingsStore.merge({ preferredModel: `ollama/${model.name}` });
+      await restartGateway();
+      await new Promise<void>((resolve, reject) => {
+        if (["connected", "idle"].includes(gateway.getStatus().state)) { resolve(); return; }
+        const timer = setTimeout(() => { gateway.off("status", check); reject(new Error("Model saved, but OpenClaw has not reconnected yet. Check Connection & settings.")); }, 30000);
+        const check = (status: GatewayStatus) => { if (["connected", "idle"].includes(status.state)) { clearTimeout(timer); gateway.off("status", check); resolve(); } };
+        gateway.on("status", check);
+      });
+      if (input.sessionKey) await gateway.request("sessions.patch", { key: input.sessionKey, model: `ollama/${model.name}` });
+      sendToRenderer("models:changed", { model: `ollama/${model.name}`, contextWindow: input.contextWindow });
+      return { model: `ollama/${model.name}`, contextWindow: input.contextWindow };
+    } finally { modelSelectionInFlight = false; }
+  });
   ipcMain.handle("setup:status", async () => {
     const [config, ollamaReachable] = await Promise.all([
       readOpenClawConfig(settings),
@@ -345,7 +381,9 @@ function registerIpc(): void {
   ipcMain.handle("settings:save", async (_event, next: AppSettings) => {
     const address = new URL(next.gatewayUrl);
     if (!["ws:", "wss:"].includes(address.protocol)) throw new Error("Connection address must use ws:// or wss://");
-    next = { ...next, host: address.hostname, port: Number(address.port || (address.protocol === "wss:" ? 443 : 80)) };
+    // Model selection is owned by the validated local-model action. A settings
+    // form opened before a model change must not restore an old preference.
+    next = { ...next, preferredModel: settings.preferredModel, host: address.hostname, port: Number(address.port || (address.protocol === "wss:" ? 443 : 80)) };
     gateway.stop();
     settings = settingsStore.save(next);
     gateway.updateSettings(settings);
@@ -393,9 +431,8 @@ function registerIpc(): void {
     return (result.sessions ?? []).map(normalizeSession);
   });
   ipcMain.handle("sessions:create", async (_event, agentId: string): Promise<ConversationSummary> => {
-    const localKey = `desktop-${Date.now().toString(36)}`;
-    const result = await gateway.request<Record<string, unknown>>("sessions.create", { agentId, key: localKey, label: "New conversation" });
-    return normalizeSession({ ...result, key: String(result.key ?? `agent:${agentId}:${localKey}`), agentId });
+    if (modelSelectionInFlight) throw new Error("A model change is in progress. Wait for the assistant to reconnect before starting a conversation.");
+    return normalizeSession(await createConversationSession(gateway, agentId, settings.preferredModel));
   });
   ipcMain.handle("sessions:rename", async (_event, key: string, title: string) => {
     await gateway.request("sessions.patch", { key, label: title, displayName: title });
@@ -411,6 +448,7 @@ function registerIpc(): void {
     return result;
   });
   ipcMain.handle("chat:send", async (_event, input: SendMessageInput) => {
+    if (modelSelectionInFlight) throw new Error("A model change is in progress. Your draft is safe; send it after the assistant reconnects.");
     const existing = memoryMessages.get(input.sessionKey) ?? [];
     const runId = randomUUID();
     const createdAt = Date.now();
