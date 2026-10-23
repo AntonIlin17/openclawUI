@@ -21,6 +21,7 @@ import type {
   GatewayStatus,
   SendMessageInput,
 } from "../../shared/types";
+import { LocalModelPicker } from "./LocalModelPicker";
 import { ChatView } from "./Conversation";
 import { ConnectionPage } from "./ConnectionPage";
 import { HomePage, FilesPage, InfoDialog } from "./WorkspacePages";
@@ -434,6 +435,24 @@ function App() {
                   </div>
                 ) : null}
               </div>
+              <LocalModelPicker
+                compact
+                sessionKey={activeKey ?? undefined}
+                activeModel={
+                  active?.model
+                    ? active.model.includes("/")
+                      ? active.model
+                      : `${active.provider ?? "ollama"}/${active.model}`
+                    : undefined
+                }
+                disabled={Boolean(status.activeRun)}
+                onApplied={(model) => {
+                  setSettings((current) =>
+                    current ? { ...current, preferredModel: model } : current,
+                  );
+                  void loadConversations();
+                }}
+              />
               {!connected ? (
                 <div className="chat-connection-note">
                   <span>Your message will stay here while you connect.</span>

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import type { AppSettings, GatewayStatus } from "../../shared/types";
 import type { SetupStatus } from "../../shared/ipc";
+import { LocalModelPicker } from "./LocalModelPicker";
 import { DiagnosticsPanel } from "./Diagnostics";
 
 export function ConnectionPage(p: {
@@ -212,6 +213,12 @@ export function ConnectionPage(p: {
             {connected ? <ArrowRight size={16} /> : <Wifi size={16} />}
           </button>
         </div>
+        <LocalModelPicker
+          disabled={
+            p.status.state === "running" || p.status.state === "streaming"
+          }
+          onApplied={() => void checkSetup()}
+        />
         <div
           className="settings-tabs"
           role="tablist"
