@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const api = {
+  getSetupStatus: () => ipcRenderer.invoke("setup:status"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
   getToolsStatus: () => ipcRenderer.invoke("openclaw:tools-status"),

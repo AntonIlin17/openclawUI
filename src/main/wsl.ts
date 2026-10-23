@@ -85,7 +85,7 @@ export async function detectAuth(settings: AppSettings): Promise<Partial<AppSett
   const token = stringValue(auth.token) ?? stringValue(gateway.token);
   const password = stringValue(auth.password) ?? stringValue(gateway.password);
   const port = numberValue(gateway.port) ?? settings.port;
-  const host = stringValue(gateway.host) ?? settings.host;
+  const host = stringValue(gateway.host) ?? (gateway.bind === "loopback" ? "127.0.0.1" : settings.host);
   return {
     ...(mode === "token" || token ? { authMode: "token" as const, token } : {}),
     ...(mode === "password" || password ? { authMode: "password" as const, password } : {}),
