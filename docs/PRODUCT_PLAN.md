@@ -1,6 +1,6 @@
 # OpenClaw Desktop product plan
 
-Status: first-release scope defined; implementation and verification pending.
+Status: desktop redesign delivered on the development branch; stock collection implementation pending.
 Updated October 22, 2026.
 
 This document separates the agreed product direction from proposed implementation.
@@ -122,7 +122,7 @@ No provider account, subscription, API key, or collection schedule has been crea
    screenshots with non-sensitive example data, explain setup and limitations,
    and provide reproducible build and release instructions.
 
-## Current baseline and observed issues
+## Initial baseline and observed issues (before the redesign)
 
 - The repository contains an Electron/React/TypeScript Windows client using a
   direct WebSocket connection to an OpenClaw Gateway in WSL Ubuntu.
@@ -175,3 +175,27 @@ For each functional stage, verify a real workflow and its failure cases before
 moving on. Capture documentation screenshots only after the corresponding workflow
 works, using synthetic or non-sensitive example data. Never publish tokens or logs
 that may contain configuration secrets.
+
+## Desktop redesign milestone — October 22, 2026
+
+Implemented on `codex/usability-and-product-direction`, tracked in pull request #2:
+
+- A new light workspace with overview, conversations, files/folders, and connection
+  settings; real service state replaces the unexplained reconnecting screen.
+- Explicit setup instructions explain that Ollama stays running and users work in
+  this desktop app rather than launching another OpenClaw interface from Ollama.
+- Conversation drafts survive navigation, failed sends keep their text, offline
+  sends are disabled, and tool results/reasoning are distinguished from answers.
+- Settings are split into connection, folder, and advanced sections. Save/discard
+  remain reachable at the minimum supported window size.
+- Loopback-bound gateways use localhost; unhealthy WSL IP fallbacks are avoided.
+  Socket replacement cannot let an old close event disconnect a new connection.
+  A WSL keep-alive follows the app lifetime when starting the local gateway.
+- Six gateway/history tests and six production-renderer UI tests pass. TypeScript,
+  main compilation, and renderer production build pass; Vite bundle-size warnings
+  remain. Live connection and a real local-model request/response were verified.
+- Real screenshots and a plain-language start guide are included in the README.
+
+Stock collection, scheduling, dedicated PC-wide search, richer result previews,
+model benchmarking, installer distribution, and release publication remain future
+work. A redesigned interface does not imply these features are implemented.
