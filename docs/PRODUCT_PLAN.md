@@ -199,3 +199,21 @@ Implemented on `codex/usability-and-product-direction`, tracked in pull request 
 Stock collection, scheduling, dedicated PC-wide search, richer result previews,
 model benchmarking, installer distribution, and release publication remain future
 work. A redesigned interface does not imply these features are implemented.
+
+## Local model milestone — October 23, 2026
+
+- Added installed-model selection in settings and conversations, with context
+  size and optional extended reasoning. Cloud aliases are excluded and models
+  without tool support are disabled.
+- Model changes preserve unrelated configuration, create a private backup,
+  reconnect the gateway, and update the selected conversation when requested.
+- Fixed duplicate labels preventing creation of additional conversations.
+- Qwen3.5 9B passed structured-output and tool-call smoke checks, plus live
+  file access, web search, and switching to/from Qwen3.6 27B. The smaller model
+  was substantially faster on the tested 16 GB GPU. These checks are not a
+  general model-quality benchmark.
+- Twelve gateway/history/model tests and nine renderer UI tests pass. TypeScript
+  and production builds pass, with the existing Vite bundle-size warning.
+
+Scheduled stock collection and the other unfinished workflows above remain
+future work.

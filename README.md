@@ -29,6 +29,9 @@ plain-language desktop interface.
   paths. File and web capabilities depend on your OpenClaw tools and model.
 - A connection page that explains the desktop, Ollama, and OpenClaw separately,
   with labeled status, recovery actions, and advanced diagnostics.
+- Installed local-model selection, with context and reasoning controls, plus
+  model switching inside a conversation. Model changes back up the OpenClaw
+  configuration and reconnect the assistant.
 - Tray behavior: closing the window keeps the app available; use the tray menu
   to exit completely.
 
@@ -51,6 +54,31 @@ Ollama are already installed. It does not install those dependencies for you.
 - A working Gateway config at `~/.openclaw/openclaw.json`
 - Ollama running with the model configured in OpenClaw
 
+## Choose a local model
+
+Open **Connection & settings → Choose your local model**. Select an installed,
+tool-capable Ollama model, choose a context size, then click **Use model**. This
+sets the default for new conversations. In a conversation, the model picker
+changes that conversation's model and also sets the default for new ones.
+
+![Local model selection with Qwen3.5 9B and a balanced 32K context](docs/screenshots/local-models.png)
+
+Start with **32K** context and extended reasoning off for responsive everyday
+tasks. Use **16K** if memory is tight. **64K** and extended reasoning can help
+with longer inputs or difficult questions, but require more memory or time.
+The picker lists local downloads and excludes Ollama cloud-model aliases;
+models without tool support are disabled. Download additional models in
+Ollama, then click **Refresh**.
+
+Qwen3.5 9B was tested with real file access and web search on an RTX 5070 Ti
+with 16 GB VRAM. Larger installed models are selectable, but may run much
+slower. Model inference stays local. **Ollama Web Search is an online service
+and requires an Ollama sign-in**, independently of local model inference.
+
+Each model change saves a private backup beside the WSL configuration as
+`~/.openclaw/openclaw.json.desktop-model-backup-<timestamp>`. Existing search
+settings, credentials, providers, and fallback settings are retained.
+
 ## Development
 
 ```powershell
@@ -70,7 +98,8 @@ npm test
 npm run test:ui
 ```
 
-`npm test` checks gateway reconnects and conversation-history normalization.
+`npm test` checks gateway reconnects, conversation creation/history, local-model
+discovery, and configuration updates with backups.
 `npm run test:ui` builds and tests the production renderer using isolated IPC
 fixtures; it does not use personal files, your OpenClaw credentials, or a live
 model. The UI tests use installed Google Chrome by default. Set
