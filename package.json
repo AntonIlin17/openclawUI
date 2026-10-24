@@ -1,6 +1,6 @@
 {
   "name": "openclaw-desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Native Windows desktop client for OpenClaw Gateway",
   "private": true,
   "type": "module",
@@ -12,8 +12,9 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "generate:icons": "tsx scripts/generate-icons.ts",
-    "dist": "npm run build && electron-builder --win nsis",
-    "release": "npm run build && electron-builder --win nsis --publish always",
+    "prepare:windows-build": "node scripts/prepare-windows-build.cjs",
+    "dist": "npm run generate:icons && npm run prepare:windows-build && npm run build && electron-builder --win nsis",
+    "release": "npm run generate:icons && npm run prepare:windows-build && npm run build && electron-builder --win nsis --publish always",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:ui": "npm run build:renderer && node --test tests/ui.test.mjs"
@@ -75,7 +76,7 @@
         }
       ],
       "icon": "assets/icon.ico",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": true
     },
     "nsis": {
       "oneClick": false,

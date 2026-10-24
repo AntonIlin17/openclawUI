@@ -154,9 +154,9 @@ function createWindow(): void {
     height: 820,
     minWidth: 900,
     minHeight: 640,
-    backgroundColor: "#f9faf7",
+    backgroundColor: "#f4f1f7",
     title: "OpenClaw Desktop",
-    icon: assetPath("icon.png"),
+    icon: assetPath(process.platform === "win32" ? "icon.ico" : "icon.png"),
     webPreferences: {
       preload,
       contextIsolation: true,
