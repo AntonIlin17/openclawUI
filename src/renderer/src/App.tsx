@@ -11,6 +11,7 @@ import {
   Search,
   Settings2,
   Sparkles,
+  ChartNoAxesCombined,
   X,
 } from "lucide-react";
 import type {
@@ -24,10 +25,12 @@ import type {
 import { LocalModelPicker } from "./LocalModelPicker";
 import { ChatView } from "./Conversation";
 import { ConnectionPage } from "./ConnectionPage";
+import { StocksPage } from "./StocksPage";
 import { HomePage, FilesPage, InfoDialog } from "./WorkspacePages";
 import "./styles.css";
+import "./workspace-theme.css";
 
-type Page = "home" | "chat" | "files" | "connection";
+type Page = "home" | "chat" | "files" | "connection" | "stocks";
 const ready = (s: GatewayStatus) =>
   ["connected", "idle", "running", "streaming"].includes(s.state);
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -192,6 +195,7 @@ function App() {
   const nav = [
     { id: "home", label: "Overview", icon: Home },
     { id: "chat", label: "Conversations", icon: MessageSquare },
+    { id: "stocks", label: "Stock data", icon: ChartNoAxesCombined },
     { id: "files", label: "Files & folders", icon: FolderOpen },
   ] as const;
 
@@ -216,7 +220,7 @@ function App() {
           aria-label="OpenClaw overview"
         >
           <span className="brand-symbol">
-            <Sparkles size={21} />
+            <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M10 20C3 10 11 5 16 15C17 1 26 3 24 15C34 5 40 12 29 21C39 22 35 33 25 29C21 39 10 34 13 26C4 31 1 22 10 20Z" fill="currentColor"/><circle cx="21" cy="22" r="5" fill="#f7f4ff"/></svg>
           </span>
           <span>
             <strong>
@@ -341,10 +345,11 @@ function App() {
             onChat={newChat}
             onFiles={() => setPage("files")}
             onAttach={() => void attach()}
-            onPlan={() => setDialog("plan")}
+            onPlan={() => setPage("stocks")}
             onHelp={() => setDialog("help")}
           />
         ) : null}
+        {page === "stocks" ? <StocksPage/> : null}
         {page === "chat" ? (
           <div className="chat-layout">
             <section

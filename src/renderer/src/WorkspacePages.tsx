@@ -146,16 +146,16 @@ export function HomePage(p: {
           <div>
             <div className="upcoming-title">
               <h3>Stock data, on your schedule.</h3>
-              <span className="planned-tag">IN DEVELOPMENT</span>
+              <span className="planned-tag">READY WHEN YOU ARE</span>
             </div>
             <p>
-              US stocks and ETFs, saved locally and ready to export. This is the
-              next workflow we’re building.
+              Your watchlist. A daily collection. A clearer picture. Save US
+              stock and ETF history locally, then export it whenever you need.
             </p>
           </div>
           <button
             className="icon-button"
-            aria-label="View stock collection plan"
+            aria-label="Open stock data collection"
             onClick={p.onPlan}
           >
             <ArrowRight size={20} />

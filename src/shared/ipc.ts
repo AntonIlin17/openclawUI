@@ -11,6 +11,7 @@ import type {
   SendMessageInput,
 } from "./types.js";
 import type { LocalModelsState, LocalModelSelection } from "./local-models.js";
+import type {StockState,StockSettings,PriceBar} from "./stocks.js";
 
 export type SaveSettingsResult = {
   settings: AppSettings;
@@ -42,6 +43,13 @@ export type UpdateCheckResult = {
 };
 
 export type OpenClawDesktopApi = {
+  getStockState(): Promise<StockState>;
+  saveStockSettings(input: StockSettings): Promise<StockState>;
+  collectStocks(): Promise<StockState>;
+  cancelStockCollection(): Promise<void>;
+  getStockBars(symbol: string): Promise<PriceBar[]>;
+  exportStocks(symbol?: string): Promise<{path: string;rows:number}|null>;
+  openStockFolder(): Promise<string>;
   getLocalModels(): Promise<LocalModelsState>;
   setLocalModel(input: LocalModelSelection): Promise<{ model: string; contextWindow: number }>;
   getSetupStatus(): Promise<SetupStatus>;

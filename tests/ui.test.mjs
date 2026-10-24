@@ -82,6 +82,8 @@ async function renderer(viewport = { width: 1180, height: 780 }) {
       saves: 0,
       modelSelection: null,
       modelFailure: false,
+      stockSaveFailure: false,
+      stockExports: [],
     };
     const localModels = {
       defaultModel: "ollama/qwen3.5:9b",
@@ -108,7 +110,106 @@ async function renderer(viewport = { width: 1180, height: 780 }) {
         },
       ],
     };
+    const stockState = {
+      settings: {
+        symbols: [],
+        enabled: false,
+        time: "20:00",
+        timeZone: "America/New_York",
+        historyDays: 365,
+        rawRetentionDays: 30,
+        notifyFailures: true,
+      },
+      summaries: [],
+      runs: [],
+      active: null,
+      nextRun: null,
+      dataFolder: "C:/fixture/stock-data",
+      totalRows: 0,
+    };
+    window.__uiTest.stocks = stockState;
     window.openclaw = {
+      getStockState: async () => structuredClone(stockState),
+      saveStockSettings: async (input) => {
+        if (window.__uiTest.stockSaveFailure)
+          throw Error("Fixture stock save failed");
+        if (input.enabled && !input.symbols.length)
+          throw Error("Add a ticker before enabling automatic collection.");
+        const symbols = [
+          ...new Set(input.symbols.map((s) => s.trim().toUpperCase())),
+        ];
+        if (symbols.some((s) => !/^[A-Z][A-Z0-9.-]{0,13}$/.test(s)))
+          throw Error("Use US ticker symbols.");
+        stockState.settings = { ...input, symbols };
+        stockState.nextRun = input.enabled ? "2026-10-24T00:00:00Z" : null;
+        window.__uiTest.emit("stocks:changed", structuredClone(stockState));
+        return structuredClone(stockState);
+      },
+      collectStocks: async () => {
+        stockState.summaries = stockState.settings.symbols.map((symbol) => ({
+          symbol,
+          count: 2,
+          firstDate: "2026-10-21",
+          lastDate: "2026-10-22",
+          close: 103,
+          previousClose: 102,
+          collectedAt: new Date().toISOString(),
+        }));
+        stockState.totalRows = stockState.summaries.length * 2;
+        stockState.runs = [
+          {
+            id: "fixture-stock-run",
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            status: "success",
+            trigger: "manual",
+            symbols: stockState.settings.symbols,
+            rows: stockState.totalRows,
+            completed: stockState.settings.symbols.length,
+            errors: [],
+            warnings: [],
+          },
+        ];
+        window.__uiTest.emit("stocks:changed", structuredClone(stockState));
+        return structuredClone(stockState);
+      },
+      getStockBars: async (symbol) =>
+        stockState.totalRows
+          ? [
+              {
+                symbol,
+                date: "2026-10-21",
+                open: 100,
+                high: 103,
+                low: 99,
+                close: 102,
+                adjustedClose: 101,
+                volume: 1000,
+                currency: "USD",
+                exchange: "TEST",
+                collectedAt: new Date().toISOString(),
+              },
+              {
+                symbol,
+                date: "2026-10-22",
+                open: 101,
+                high: 104,
+                low: 100,
+                close: 103,
+                adjustedClose: 102,
+                volume: 2000,
+                currency: "USD",
+                exchange: "TEST",
+                collectedAt: new Date().toISOString(),
+              },
+            ]
+          : [],
+      exportStocks: async (symbol) => {
+        window.__uiTest.stockExports.push(symbol ?? "all");
+        return { path: "C:/fixture/export.csv", rows: stockState.totalRows };
+      },
+      cancelStockCollection: async () => {},
+      openStockFolder: async () => "",
       getLocalModels: async () => localModels,
       setLocalModel: async (input) => {
         if (window.__uiTest.modelFailure)
@@ -201,7 +302,150 @@ async function connect(page) {
   await page.getByRole("button", { name: /Local assistant ready/ }).waitFor();
 }
 
-test("overview explains the offline state and labels unfinished stock collection", async () => {
+test("stock workspace saves a watchlist and schedule, charts collected data, and exports", async () => {
+  const f = await renderer();
+  try {
+    await f.page
+      .getByRole("button", { name: "Stock data", exact: true })
+      .click();
+    await f.page
+      .getByRole("textbox", { name: "Add stock tickers" })
+      .fill("aapl, SPY, AAPL");
+    await f.page.getByRole("button", { name: "Add", exact: true }).click();
+    await f.page
+      .getByRole("combobox", { name: "Chart ticker" })
+      .selectOption("SPY");
+    await f.page
+      .getByRole("checkbox", { name: "Automatic stock collection" })
+      .check();
+    await f.page
+      .getByRole("textbox", { name: "Collection time" })
+      .fill("21:15");
+    await f.page
+      .getByRole("button", { name: "Save schedule", exact: true })
+      .click();
+    await f.page
+      .getByRole("status")
+      .filter({ hasText: "Schedule saved" })
+      .waitFor();
+    const saved = await f.page.evaluate(() => window.__uiTest.stocks.settings);
+    assert.deepEqual(saved.symbols, ["AAPL", "SPY"]);
+    assert.equal(saved.enabled, true);
+    assert.equal(saved.time, "21:15");
+    await f.page
+      .getByRole("button", { name: "Collect now", exact: true })
+      .click();
+    await f.page
+      .getByRole("img", { name: /SPY daily closing prices/ })
+      .waitFor();
+    await f.page
+      .getByRole("button", { name: "Export CSV", exact: true })
+      .click();
+    await f.page
+      .getByRole("status")
+      .filter({ hasText: "Exported 4 rows" })
+      .waitFor();
+    assert.deepEqual(
+      await f.page.evaluate(() => window.__uiTest.stockExports),
+      ["all"],
+    );
+  } finally {
+    await f.close();
+  }
+});
+test("stock settings retain edits on failure and block controls during collection", async () => {
+  const f = await renderer();
+  try {
+    await f.page
+      .getByRole("button", { name: "Stock data", exact: true })
+      .click();
+    await f.page
+      .getByRole("textbox", { name: "Add stock tickers" })
+      .fill("AAPL");
+    await f.page.evaluate(() => (window.__uiTest.stockSaveFailure = true));
+    await f.page.getByRole("button", { name: "Add", exact: true }).click();
+    await f.page
+      .getByRole("alert")
+      .filter({ hasText: "Fixture stock save failed" })
+      .waitFor();
+    assert.equal(
+      await f.page
+        .getByRole("textbox", { name: "Add stock tickers" })
+        .inputValue(),
+      "AAPL",
+    );
+    await f.page.evaluate(() => {
+      window.__uiTest.stockSaveFailure = false;
+    });
+    await f.page.getByRole("button", { name: "Add", exact: true }).click();
+    await f.page
+      .getByRole("status")
+      .filter({ hasText: "Watchlist saved" })
+      .waitFor();
+    await f.page.evaluate(() => {
+      const state = window.__uiTest.stocks;
+      state.active = {
+        id: "in-flight",
+        startedAt: new Date().toISOString(),
+        trigger: "manual",
+        status: "running",
+        symbols: ["AAPL"],
+        completed: 0,
+        rows: 0,
+        errors: [],
+        warnings: [],
+      };
+      window.__uiTest.emit("stocks:changed", structuredClone(state));
+    });
+    await f.page.getByRole("button", { name: "Stop", exact: true }).waitFor();
+    assert(
+      await f.page
+        .getByRole("textbox", { name: "Add stock tickers" })
+        .isDisabled(),
+    );
+    assert(
+      await f.page
+        .getByRole("button", { name: "Save schedule", exact: true })
+        .isDisabled(),
+    );
+    assert(
+      await f.page
+        .getByRole("button", { name: "Stop", exact: true })
+        .isEnabled(),
+    );
+  } finally {
+    await f.close();
+  }
+});
+test("stock dashboard remains usable at the minimum supported window", async () => {
+  const f = await renderer({ width: 900, height: 640 });
+  try {
+    await f.page
+      .getByRole("button", { name: "Stock data", exact: true })
+      .click();
+    await f.page
+      .getByRole("textbox", { name: "Add stock tickers" })
+      .fill("SPY");
+    await f.page.getByRole("button", { name: "Add", exact: true }).click();
+    await f.page
+      .getByRole("button", { name: "Save schedule", exact: true })
+      .scrollIntoViewIfNeeded();
+    assert(
+      await f.page
+        .getByRole("button", { name: "Save schedule", exact: true })
+        .isVisible(),
+    );
+    assert(
+      await f.page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("overview explains the offline state and opens stock collection independently", async () => {
   const f = await renderer();
   try {
     await f.page.getByText("First, let’s connect your assistant.").waitFor();
@@ -212,14 +456,14 @@ test("overview explains the offline state and labels unfinished stock collection
       0,
     );
     await f.page
-      .getByRole("button", { name: "View stock collection plan" })
+      .getByRole("button", { name: "Open stock data collection" })
       .click();
-    await f.page
-      .getByRole("dialog")
-      .getByText("No collection or schedule is running yet.", { exact: false })
-      .waitFor();
-    await f.page.keyboard.press("Escape");
-    assert.equal(await f.page.getByRole("dialog").count(), 0);
+    await f.page.getByRole("heading", { name: "Price history" }).waitFor();
+    assert(
+      await f.page
+        .getByRole("button", { name: "Collect now", exact: true })
+        .isDisabled(),
+    );
   } finally {
     await f.close();
   }
@@ -510,6 +754,11 @@ test("conversation picker passes the current session and is disabled during a ru
         },
       }),
     );
+    await f.page
+      .getByText("Wait for the current run to finish before changing models.", {
+        exact: true,
+      })
+      .waitFor();
     assert(
       await f.page
         .getByRole("button", { name: "Use model", exact: true })

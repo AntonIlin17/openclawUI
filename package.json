@@ -1,6 +1,6 @@
 {
   "name": "openclaw-desktop",
-  "version": "0.1.2",
+  "version": "0.3.0",
   "description": "Native Windows desktop client for OpenClaw Gateway",
   "private": true,
   "type": "module",
@@ -12,8 +12,9 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "generate:icons": "tsx scripts/generate-icons.ts",
-    "dist": "npm run build && electron-builder --win nsis",
-    "release": "npm run build && electron-builder --win nsis --publish always",
+    "prepare:windows-build": "node scripts/prepare-windows-build.cjs",
+    "dist": "npm run generate:icons && npm run prepare:windows-build && npm run build && electron-builder --win nsis",
+    "release": "npm run generate:icons && npm run prepare:windows-build && npm run build && electron-builder --win nsis --publish always",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:ui": "npm run build:renderer && node --test tests/ui.test.mjs"
@@ -32,12 +33,14 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "sql.js": "^1.15.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
+    "@types/sql.js": "^1.4.11",
     "@types/ws": "^8.5.13",
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",
@@ -73,7 +76,7 @@
         }
       ],
       "icon": "assets/icon.ico",
-      "signAndEditExecutable": false
+      "signAndEditExecutable": true
     },
     "nsis": {
       "oneClick": false,
