@@ -1,7 +1,8 @@
 # OpenClaw Desktop product plan
 
-Status: desktop redesign delivered on the development branch; stock collection implementation pending.
-Updated October 22, 2026.
+Status: version 0.3.0 implements daily stock collection, scheduling, local storage,
+charts, CSV export, and the updated desktop design. See milestone notes below.
+Updated October 23, 2026.
 
 This document separates the agreed product direction from proposed implementation.
 Planned features below are not claims about the current app.
@@ -104,7 +105,9 @@ The initial no-account preference takes priority over the earlier API-key provid
 suggestion. Provider choice is not settled by the research list above. CSV import
 can provide a useful fallback without silently substituting or fabricating data.
 
-No provider account, subscription, API key, or collection schedule has been created.
+The first release uses the no-account Yahoo daily chart endpoint. No provider
+account, subscription, or API key is created. Collection schedules are configured
+inside the desktop app; details are in [STOCK_DATA.md](STOCK_DATA.md).
 
 ## Delivery stages
 
@@ -154,15 +157,11 @@ and diagnostic logs out of commits.
 
 ## Remaining implementation decisions
 
-- Validate the no-account provider, runtime compatibility, adjustment behavior,
-  failure handling, and actual historical coverage before committing to it.
-- Implement editable defaults for watchlist, history range, output location,
-  retention, and notifications. The owner delegated unspecified stock-data
-  implementation choices; these do not require another broad discovery round.
+- Monitor the no-account provider's availability/coverage and evaluate additional
+  provider adapters if needed. Keep adjustment and licensing limitations explicit.
 - What research results should contain, which file types to prioritize, and the
   exact file operations supported in the next stage.
-- Which local model best handles task configuration and tool use on the available
-  hardware; evaluate it against concrete tasks before changing the configured model.
+- Broader local-model evaluations beyond the completed smoke checks.
 - Public project name and license, after the working product direction is settled.
 
 ## Verification and Git workflow
@@ -232,3 +231,26 @@ future work.
 
 The installer was built and installed locally. A public GitHub release has not
 been published.
+
+## Scheduled stock collection and visual refresh — October 23, 2026
+
+- An editable 30-ticker US watchlist, validated Yahoo daily OHLCV and separate
+  adjusted close, local SQLite storage, compressed source responses, and CSV plus
+  metadata export. The collector runs independently of OpenClaw and Ollama.
+- A timezone-aware weekday schedule, tray operation, wake/startup reconciliation,
+  bounded retries, cancellation, per-ticker progress/errors, and interrupted-run
+  recovery. One missed slot refreshes the chosen history window.
+- A lavender workspace inspired by the supplied references, pastel metric cards,
+  a real interactive price chart, watchlist table, schedule editor, and run history.
+- Original app/tray/desktop icons, with executable icon resources embedded during
+  packaging. The Windows tool preparation handles macOS-only symlinks in the
+  upstream archive without requiring elevated symlink privileges.
+- 25 unit tests and 12 production-renderer tests cover the implemented workflows.
+  Live checks collected AAPL/MSFT/SPY, ran an automatic catch-up, and exported
+  750 distinct ticker/date records through the native save dialog.
+
+Intraday data, analysis/trading execution, dedicated whole-PC search, and richer
+research/task previews remain outside this milestone. Data availability is not
+guaranteed, and missing sessions are not invented. A Windows reboot/sleep cycle
+was not forced during testing; schedule/recovery behavior is covered with clock
+controlled tests and a real timer-driven catch-up run.

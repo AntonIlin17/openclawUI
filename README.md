@@ -1,13 +1,16 @@
 # OpenClaw Desktop
 
-**A clearer Windows workspace for your local OpenClaw assistant.**
+**Your local assistant, files, and scheduled market data in one Windows workspace.**
 
-Chat with your local model, bring files into a conversation, and manage your
-OpenClaw connection without working in a terminal every day. The app connects
+Collect daily stock and ETF history on a schedule, inspect price charts, and
+export your dataset. Chat with your local model, bring files into a conversation,
+and manage your OpenClaw connection without working in a terminal every day. The app connects
 Ollama and an existing OpenClaw installation in WSL Ubuntu through a guided,
 plain-language desktop interface.
 
 ![OpenClaw Desktop overview with a connected local assistant](docs/screenshots/overview.png)
+
+![Stock data dashboard with a real daily dataset and an enabled collection schedule](docs/screenshots/stocks.png)
 
 ## Start here
 
@@ -15,13 +18,20 @@ plain-language desktop interface.
    Ollama or start a chat there.
 2. **Open Connection & settings in this app.** Check the model and OpenClaw status,
    then choose **Connect assistant** if needed.
-3. **Start a conversation or choose a file.** Use **Conversations** for questions
+3. **Collect stock data.** Open **Stock data**, add US ticker symbols, then choose
+   **Collect now**. Set a weekday collection time and enable **Automatic collection**,
+   then **Save schedule**. Use **Export CSV** to save the dataset and metadata.
+4. **Start a conversation or choose a file.** Use **Conversations** for questions
    and **Files & folders** to attach documents or configure folder guidance.
 
 ![A real connection test answered by the local model](docs/screenshots/conversation.png)
 
 ## What works today
 
+- An editable US stock/ETF watchlist, daily OHLCV and adjusted-close history,
+  interactive price charts, local SQLite storage, and CSV + metadata exports.
+- Timezone-aware weekday scheduling in the tray, catch-up after wake/reopening,
+  bounded retries, progress, stop controls, run history, and inspectable errors.
 - An overview with clear starting points for file questions and research requests.
 - Local assistant conversations, saved history, inline renaming, and Markdown/PDF
   export. Failed sends keep the draft so you can retry.
@@ -35,20 +45,46 @@ plain-language desktop interface.
 - Tray behavior: closing the window keeps the app available; use the tray menu
   to exit completely.
 
-**Still in development:** scheduled US stock/ETF data collection and CSV export,
-a dedicated whole-PC search interface, and richer task/result previews. The UI
-labels stock collection as in development; it is not collecting data yet. See the
+**Still in development:** a dedicated whole-PC search interface and richer
+research/task previews. Trading execution is outside this release. See the
 [product plan](docs/PRODUCT_PLAN.md) for scope and priorities.
 
 ![Connection settings showing Ollama available and OpenClaw connected](docs/screenshots/connection.png)
 
-These are screenshots of the running desktop app, including a real local-model
-connection test. This is an early development build; it assumes OpenClaw and
-Ollama are already installed. It does not install those dependencies for you.
+These are screenshots of the running app using real collected market data and a
+local-model connection. The chat/file assistant assumes OpenClaw and Ollama are
+already installed. The stock collector works independently of those services.
+
+## Your stock-data workflow
+
+Add up to 30 US ticker symbols (for example `AAPL`, `MSFT`, `SPY`, or `BRK-B`;
+examples are not recommendations). Choose 90 days, one year, or two years of
+requested daily history. **Collect now** saves validated completed sessions.
+Click a ticker to inspect its chart and use the chart range/price inspection
+controls. Exports contain all saved history for the current watchlist, or the
+selected ticker via **Export [ticker]**, plus a metadata sidecar.
+
+Automatic collection is opt-in, with a default of **20:00 America/New_York on
+weekdays**. Keep the app in the tray. After sleep or reopening it reconciles
+the most recent missed slot by refreshing the requested history window. A PC
+that is powered off collects when it runs again. Previously stored prices are
+retained on request failures; refreshes update revisions rather than duplicate
+rows. Run details show errors and data-quality warnings.
+
+**Source:** Yahoo Finance's unofficial public daily chart endpoint, without an
+account or API key, for personal research. Availability and historical adjustments
+can change. This is not a guaranteed official or real-time feed. The app excludes
+in-progress sessions, keeps adjusted close separate, flags long gaps/stale dates,
+and never fills missing prices. See [stock data details](docs/STOCK_DATA.md) for
+storage, adjustment policies, retries, retention, export fields, and limitations.
 
 ## Prerequisites
 
 - Windows 10/11
+- Internet access for stock collection; this feature needs no model, WSL, or account.
+
+For the local chat/file assistant, also install:
+
 - WSL2 with Ubuntu
 - OpenClaw installed inside Ubuntu
 - A working Gateway config at `~/.openclaw/openclaw.json`
@@ -60,7 +96,7 @@ Use **OpenClaw Desktop** from the desktop shortcut or Windows Start menu. The
 installed executable is normally at
 `%LOCALAPPDATA%\Programs\OpenClaw Desktop\OpenClaw Desktop.exe`.
 **Help → Version** identifies the build; the redesigned installer is version
-**0.2.0**. Enable **Launch on startup** in Connection & settings if you want it
+**0.3.0**. Enable **Launch on startup** in Connection & settings if you want it
 to open when you sign in to Windows.
 
 Running the repository through Electron does not replace an installed copy.
@@ -132,13 +168,16 @@ npm run test:ui
 ```
 
 `npm test` checks gateway reconnects, conversation creation/history, local-model
-discovery, and configuration updates with backups.
+configuration, stock provider validation, SQLite persistence/revisions, scheduling,
+retry limits, cancellation, and interrupted-run recovery.
 `npm run test:ui` builds and tests the production renderer using isolated IPC
 fixtures; it does not use personal files, your OpenClaw credentials, or a live
 model. The UI tests use installed Google Chrome by default. Set
 `PLAYWRIGHT_CHANNEL=msedge` to use an installed Edge browser instead.
 
-The redesign was also checked against a live local gateway and Ollama model.
+The stock watchlist, real scheduled catch-up, chart, native CSV save dialog, and
+exported row uniqueness were checked against a live local app. The assistant was
+also checked against a live local gateway and Ollama model.
 Production builds currently emit Vite large-bundle warnings.
 
 ## Build Installer
@@ -148,7 +187,11 @@ npm run generate:icons
 npm run dist
 ```
 
-The NSIS installer is written to `release/`. Code signing placeholders are present in `package.json` via `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`, but signing is optional.
+The NSIS installer is written to `release/`. Icon assets are generated before
+packaging, and Windows executable resources embed the custom application icon.
+The build preparation step verifies the pinned official Windows tool archive and
+excludes its macOS-only symlinks so normal Windows builds need no symlink privilege.
+Code signing is optional; an unsigned build still embeds the custom icon.
 
 ## Gateway Protocol
 
@@ -209,7 +252,10 @@ $env:GH_TOKEN = "<your github token with repo scope>"
 npm run release
 ```
 
-`electron-builder` will build the NSIS installer, sign nothing (signing is disabled), and publish the installer + `latest.yml` to a new GitHub release. Installed clients pick it up on next launch — no manual uninstall/reinstall needed.
+`electron-builder` builds the NSIS installer and publishes it with `latest.yml`
+to a new GitHub release. Without a configured certificate the installer is unsigned.
+Installed clients check published releases; merging source into `master` alone
+does not publish an installer or update another PC.
 
 ## Tray Behavior
 
