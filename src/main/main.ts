@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, ipcMain, dialog, nativeImage, shell } from "electron";
+import { app, BrowserWindow, Menu, Tray, ipcMain, dialog, nativeImage, shell, powerMonitor, Notification } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -13,6 +13,9 @@ import { installedLocalModels } from "./local-models.js";
 import { modelUpdateCommand } from "./model-config.js";
 import { validateLocalModelSelection, type LocalModelSelection } from "../shared/local-models.js";
 import { SettingsStore } from "./settings.js";
+import { StockStore, stockCsv } from "./stock-store.js";
+import { StockService } from "./stock-service.js";
+import type { StockSettings, StockRun } from "../shared/stocks.js";
 import { logger } from "./logger.js";
 import { buildFileAccessContext } from "../shared/message-context.js";
 import {
@@ -56,6 +59,8 @@ let modelSelectionInFlight = false;
 let settingsStore: SettingsStore;
 let settings: AppSettings;
 let gateway: GatewayClient;
+let stocks: StockService | null = null;
+let stocksError = "Stock storage is still opening. Try again in a moment.";
 const memoryMessages = new Map<string, ChatMessage[]>();
 const activeRuns = new Map<string, ActiveRunStatus>();
 
@@ -77,6 +82,19 @@ app.whenReady().then(async () => {
   settings = settingsStore.load();
   if (process.platform === "win32") app.setAppUserModelId("ai.openclaw.desktop");
   syncLoginStartup();
+  try {
+    stocks = new StockService(await StockStore.open(path.join(app.getPath("userData"), "stock-data")));
+    stocks.on("changed", state => sendToRenderer("stocks:changed", state));
+    stocks.on("finished", (run: StockRun) => {
+      if (run.trigger !== "manual" && ["failed", "partial"].includes(run.status) && stocks?.store.settings().notifyFailures && Notification.isSupported())
+        new Notification({ title: "Stock collection needs attention", body: `${run.errors.length} ticker or storage issue(s). Open Stock data to review and retry.`, icon: assetPath("icon.png") }).show();
+    });
+    stocks.start();
+    powerMonitor.on("resume", () => void stocks?.tick().catch(error => logger.warn("stocks", errorMessage(error))));
+  } catch (error) {
+    stocksError = `Could not open the stock database. Existing files were retained. ${errorMessage(error)}`;
+    logger.error("stocks", stocksError);
+  }
   logger.info("boot", "settings loaded", {
     gatewayUrl: settings.gatewayUrl,
     wslDistro: settings.wslDistro,
@@ -107,6 +125,7 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  stocks?.stop();
   gateway?.stop();
   gatewayProcess?.kill();
   modelProcess?.kill();
@@ -350,6 +369,31 @@ function ingestGatewayEvent(event: GatewayEventFrame): void {
 }
 
 function registerIpc(): void {
+  const stockService = () => { if (!stocks) throw new Error(stocksError); return stocks; };
+  ipcMain.handle("stocks:state", () => stockService().state());
+  ipcMain.handle("stocks:settings", (_event, input: StockSettings) => stockService().saveSettings(input));
+  ipcMain.handle("stocks:collect", () => stockService().collect());
+  ipcMain.handle("stocks:cancel", () => stockService().cancel());
+  ipcMain.handle("stocks:bars", (_event, symbol: string) => {
+    if (typeof symbol !== "string" || !/^[A-Z][A-Z0-9.-]{0,13}$/.test(symbol)) throw new Error("Choose a ticker from your watchlist.");
+    return stockService().store.bars(symbol);
+  });
+  ipcMain.handle("stocks:open-folder", () => shell.openPath(stockService().store.folder));
+  ipcMain.handle("stocks:export", async (_event, symbol?: string) => {
+    const service = stockService();
+    const watchlist = service.store.settings().symbols;
+    if (symbol !== undefined && !watchlist.includes(symbol)) throw new Error("Choose a ticker from your watchlist.");
+    const symbols = symbol ? [symbol] : watchlist;
+    const rows = service.store.exportRows(symbols);
+    if (!rows.length) throw new Error("Collect some data before exporting.");
+    const result = await dialog.showSaveDialog(mainWindow!, { title: "Export daily stock data", defaultPath: path.join(app.getPath("documents"), `stock-data-${symbol ?? "watchlist"}-${new Date().toISOString().slice(0, 10)}.csv`), filters: [{ name: "CSV dataset", extensions: ["csv"] }] });
+    if (result.canceled || !result.filePath) return null;
+    const target = result.filePath;
+    fs.writeFileSync(target + ".tmp", stockCsv(rows)); fs.renameSync(target + ".tmp", target);
+    const metadata = { provider: "Yahoo Finance (unofficial public chart endpoint)", feed: "chart-daily", interval: "1d", exportedAt: new Date().toISOString(), appVersion: app.getVersion(), symbols, rows: rows.length, currency: "USD", marketDate: "Exchange-local trading date", adjustment: "Provider OHLC as reported (may be split-adjusted); adjusted_close is the separate provider dividend/split-adjusted close when supplied. Historical revisions replace previous values and increment revisions. Not a point-in-time dataset.", rawResponses: "Compressed originals retained in the app data folder for the configured retention period.", limitations: "Personal research; not a guaranteed official or real-time feed. No synthetic holiday/weekend rows or missing prices are filled." };
+    fs.writeFileSync(target + ".metadata.json", JSON.stringify(metadata, null, 2));
+    return { path: target, rows: rows.length };
+  });
   ipcMain.handle("models:local-list", async () => {
     const [models, config] = await Promise.all([installedLocalModels(), readOpenClawConfig(settings)]);
     const cfg = config as any;

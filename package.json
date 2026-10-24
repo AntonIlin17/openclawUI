@@ -32,12 +32,14 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "sql.js": "^1.15.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
+    "@types/sql.js": "^1.4.11",
     "@types/ws": "^8.5.13",
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",

@@ -1,6 +1,13 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const api = {
+  getStockState: () => ipcRenderer.invoke("stocks:state"),
+  saveStockSettings: (input) => ipcRenderer.invoke("stocks:settings", input),
+  collectStocks: () => ipcRenderer.invoke("stocks:collect"),
+  cancelStockCollection: () => ipcRenderer.invoke("stocks:cancel"),
+  getStockBars: (symbol) => ipcRenderer.invoke("stocks:bars", symbol),
+  exportStocks: (symbol) => ipcRenderer.invoke("stocks:export", symbol),
+  openStockFolder: () => ipcRenderer.invoke("stocks:open-folder"),
   getLocalModels: () => ipcRenderer.invoke("models:local-list"),
   setLocalModel: (input) => ipcRenderer.invoke("models:local-select", input),
   getSetupStatus: () => ipcRenderer.invoke("setup:status"),
