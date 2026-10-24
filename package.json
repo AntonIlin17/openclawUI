@@ -1,6 +1,6 @@
 {
   "name": "openclaw-desktop",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Native Windows desktop client for OpenClaw Gateway",
   "private": true,
   "type": "module",

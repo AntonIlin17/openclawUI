@@ -75,6 +75,8 @@ app.whenReady().then(async () => {
   });
   settingsStore = new SettingsStore();
   settings = settingsStore.load();
+  if (process.platform === "win32") app.setAppUserModelId("ai.openclaw.desktop");
+  syncLoginStartup();
   logger.info("boot", "settings loaded", {
     gatewayUrl: settings.gatewayUrl,
     wslDistro: settings.wslDistro,
@@ -110,6 +112,17 @@ app.on("before-quit", () => {
   modelProcess?.kill();
   wslKeepAlive?.kill();
 });
+
+function syncLoginStartup(): void {
+  // Development launches must not replace the installed app's startup command.
+  if (!app.isPackaged) return;
+  app.setLoginItemSettings({
+    openAtLogin: settings.autostart,
+    name: "OpenClaw Desktop",
+    path: process.execPath,
+    args: [],
+  });
+}
 
 function createWindow(): void {
   const preload = app.isPackaged
@@ -387,7 +400,7 @@ function registerIpc(): void {
     gateway.stop();
     settings = settingsStore.save(next);
     gateway.updateSettings(settings);
-    app.setLoginItemSettings({ openAtLogin: settings.autostart });
+    syncLoginStartup();
     let orientError: string | undefined;
     try {
       await orientOpenClaw(settings, settings.fileAccessPaths);

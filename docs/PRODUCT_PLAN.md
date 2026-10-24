@@ -217,3 +217,18 @@ work. A redesigned interface does not imply these features are implemented.
 
 Scheduled stock collection and the other unfinished workflows above remain
 future work.
+
+## Installed Windows build — October 23, 2026
+
+- Version 0.2.0 packages the redesign as an NSIS installer. A local Windows
+  installation was updated and verified with a real model response.
+- Installed builds synchronize the named OpenClaw Desktop startup entry with
+  their executable and saved preference. Development launches do not replace
+  the installed startup command.
+- Desktop/Start menu shortcuts and a stale development startup entry were
+  repaired on the test PC, with the previous app/settings backed up privately.
+- The README now distinguishes the installed app, development Electron runs,
+  Ollama's integration tiles, and model selection.
+
+The installer was built and installed locally. A public GitHub release has not
+been published.

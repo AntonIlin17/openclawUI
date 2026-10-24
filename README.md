@@ -54,6 +54,39 @@ Ollama are already installed. It does not install those dependencies for you.
 - A working Gateway config at `~/.openclaw/openclaw.json`
 - Ollama running with the model configured in OpenClaw
 
+## Open the installed desktop app
+
+Use **OpenClaw Desktop** from the desktop shortcut or Windows Start menu. The
+installed executable is normally at
+`%LOCALAPPDATA%\Programs\OpenClaw Desktop\OpenClaw Desktop.exe`.
+**Help → Version** identifies the build; the redesigned installer is version
+**0.2.0**. Enable **Launch on startup** in Connection & settings if you want it
+to open when you sign in to Windows.
+
+Running the repository through Electron does not replace an installed copy.
+After building a new installer with `npm run dist`, run that installer to update
+the installed app and its shortcuts. Pushing source changes to a branch does
+not update Windows installations automatically. Installed builds register their
+own executable for startup; development launches do not overwrite that entry.
+
+### What to do in Ollama
+
+Leave Ollama running, then work in **OpenClaw Desktop**. Select your model in
+this app's Connection & settings page or conversation model picker.
+
+Ollama's **Apps** screen offers integrations with separate tools. The tiles are
+not model choices, and none needs to be launched for this desktop setup:
+
+- **OpenClaw, Hermes Agent, Hermes Desktop:** assistant integrations.
+- **Claude Code, Codex CLI, OpenCode, Droid, Pi, Cline, Copilot CLI, Oh My Pi,
+  DeepSeek Harness, Qwen Code:** developer/coding tool integrations.
+- **Terminal:** a command-line entry point.
+
+The OpenClaw tile can start OpenClaw's own setup/terminal interface, which is
+separate from this desktop workspace. See the official
+[Ollama integrations](https://docs.ollama.com/integrations) and
+[OpenClaw launch documentation](https://docs.ollama.com/integrations/openclaw).
+
 ## Choose a local model
 
 Open **Connection & settings → Choose your local model**. Select an installed,
